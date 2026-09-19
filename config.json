@@ -26,7 +26,6 @@
     "Keys beginning with an underscore are documentation for the key above them",
     "and are ignored."
   ],
-
   "app": {
     "name": "InBrowser",
     "slug": "inbrowser",
@@ -35,66 +34,55 @@
     "tagline": "The whole AI stack, in one browser tab.",
     "description": "The whole AI stack in one browser tab. Local models, twelve language runtimes, agents and skills. No account, no API key, no server.",
     "repoUrl": "https://github.com/Choy0X/Inbrowser",
-
     "organizationName": "InBrowser",
     "_organizationName": "The publisher named in schema.org Organization. Separate from name so a project and its publisher can differ later without a rename.",
-
     "logoPath": "/icon-512.png",
     "_logoPath": "Origin-relative. Becomes the absolute Organization.logo in structured data.",
-
     "locale": "en",
     "_locale": "BCP 47. Fills <html lang> and og:locale. There is no translated build, so this is the only one.",
-
     "twitterHandle": "",
     "_twitterHandle": "Without the @. Empty means no twitter:site tag is emitted at all, which is correct - a blank one is worse than none."
   },
-
   "client": {
     "_comment": "Compiled into the browser bundle. Never put a secret here.",
-
     "relayUrl": "",
     "_relayUrl": "Empty means this deployment's own origin, which is right when the server serves the client. A build hosted on a CDN with no server of its own must set an absolute URL here or the proxy feature has nowhere to go.",
-
     "searchBackend": "duckduckgo",
     "_searchBackend": "duckduckgo | serper | jina. The default for a new user; everyone can change it in Settings.",
-
     "streamIdleTimeoutMs": 45000,
     "_streamIdleTimeoutMs": "How long a stream may go silent before it is treated as dead. Generous on purpose: it exists to catch a connection that went away without closing, not to enforce a deadline.",
-
     "maxRoutingAttempts": 12,
     "_maxRoutingAttempts": "How many models and proxies \"auto\" may try before giving up on a turn.",
-
     "suggestionsEnabled": true,
     "_suggestionsEnabled": "Whether the chat empty state fetches its starter prompts from GET /v1/suggestions on this deployment's own server. This is the ONLY first-party API call the client makes on an ordinary page load; it sends a day part and up to three model-capability booleans, and no identifier, chat content or history. Set false for a build hosted on a CDN with no server of its own - it would otherwise request a 404 on every visit - and the suggestion grid is simply not rendered.",
-
     "analyticsId": "G-T9T4EZ4LE8",
     "_analyticsId": "GA4 Measurement ID, from Google Analytics > Admin > Data Streams (that stream's own id, 15799240062, never appears in code - only the Measurement ID does). Empty disables analytics entirely, which is the default a fork of this repository should keep: without it, a self-hosted deployment would silently report its visitors to InBrowser's own GA property."
   },
-
   "server": {
     "_comment": "Server only. Never compiled into the bundle. Each key names the environment variable that overrides it.",
-
     "port": 4173,
     "_port": "PORT. Production only; development uses devPort.",
-
     "devPort": 5173,
-
+    "_devPort": "PORT, the same variable - it overrides whichever of port/devPort applies. Development only: NODE_ENV=production reads `port` instead.",
     "workerUrl": "wss://relay.inbrowser.tech/v1",
     "_workerUrl": "WORKER_URL. The Cloudflare Worker that dials proxies (the inbrowser-relay repo). Must be the wss:// scheme and must end in /v1 - the worker answers the tunnel only on that path and 404s everything else, and its /health route is for the Settings test button, not for this. Empty disables proxying - those requests return 503.",
-
     "relaySecret": "",
     "_relaySecret": "RELAY_SECRET. Must match the Worker's. Generate with `openssl rand -hex 32`. Leave this empty and set the environment variable in production: this file is committed, so a secret written here is public.",
-
     "allowedOrigins": [],
     "_allowedOrigins": "ALLOWED_ORIGINS, comma-separated. Empty is correct when this server serves the client, because the relay is then same-origin and needs no CORS at all. Set it only for a deployment whose client is hosted elsewhere.",
-
     "maxBodyBytes": 33554432,
     "_maxBodyBytes": "MAX_BODY_BYTES. 32 MiB. Caps a proxied upload.",
-
     "rateLimitPerMinute": 120,
     "_rateLimitPerMinute": "RATE_LIMIT_PER_MINUTE. Proxied requests per client address per minute.",
-
     "distDir": "",
-    "_distDir": "DIST_DIR. Where the built client lives. Empty means ./dist relative to the working directory, which must be the repo root."
+    "_distDir": "DIST_DIR. Where the built client lives. Empty means ./dist relative to the working directory, which must be the repo root.",
+    "metricsPort": 0,
+    "_metricsPort": "METRICS_PORT. Aggregate, non-identifying counters on GET /metrics, always bound to 127.0.0.1 and never reachable through the edge. 0 disables the listener entirely, which is the default: a self-hoster should get the same one-port process the deploy docs describe unless they ask for more.",
+    "maxInflightTunnels": 750,
+    "_maxInflightTunnels": "MAX_INFLIGHT_TUNNELS. Proxied requests this process will hold open at once before answering 503 relay_at_capacity. PER CLUSTER WORKER, not per box - multiply by clusterWorkers. 0 removes the bound, which is how this behaved before admission control existed and is not advisable anywhere a real user can reach. Re-measure with scripts/loadtest-relay.ts before changing it.",
+    "clusterWorkers": 1,
+    "_clusterWorkers": "CLUSTER_WORKERS. Worker processes sharing the listening socket. 1 keeps everything in one process. 0 sizes to the box. The motive is not throughput: most CPU at this concurrency goes on per-message work for streamed replies, so a single process means one garbage collection pause stalls every live stream at once. Development always forces 1.",
+    "poolTunnels": false,
+    "_poolTunnels": "POOL_TUNNELS=1. Reuse a tunnel across requests. Off by default and best left that way - measured hit rate is about 7.5% in the most favourable case and near zero for the workloads that matter, and it is the one setting that affects request isolation. Read the header of server/src/tunnelPool.ts before enabling it."
   }
 }
