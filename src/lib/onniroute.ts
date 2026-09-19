@@ -48,8 +48,8 @@ import { geminiAdapter } from "./gateway/adapters/gemini";
 import { localAdapter } from "./gateway/adapters/local";
 import { excludeKeyFor, recordOutcome, resolve, resolveDirect } from "./gateway/autoRoute";
 import { selectUsableModels, beginModelAttempt } from "./gateway/routingEngine";
-import { pickProxy, recordProxyOutcome, beginProxyAttempt } from "./gateway/proxyRouting";
-import { activeProxyOrUndefined } from "./gateway/activeProxy";
+import { recordProxyOutcome, beginProxyAttempt } from "./gateway/proxyRouting";
+import { activeProxyOrUndefined, pickProxyForSettings } from "./gateway/activeProxy";
 import { providerFetch } from "./gateway/providerFetch";
 import { responseProxy } from "./gateway/responseProxy";
 import { looksLikePaymentRequired } from "./gateway/util";
@@ -480,7 +480,7 @@ export async function chatStream(options: ChatStreamOptions): Promise<ChatStream
       target = resolve(
         options.model,
         settings.providers.filter(c => !providerPresetForUrl(c.baseUrl)?.requiresProxy ||
-          pickProxy(settings.proxies, new Set(), settings.proxyRoutingMode, settings.manualProxyIds, c.baseUrl)),
+          pickProxyForSettings(settings, new Set(), c.baseUrl)),
         excluded,
         options.messages,
         options.tools,
@@ -493,13 +493,7 @@ export async function chatStream(options: ChatStreamOptions): Promise<ChatStream
       // Seeded rather than cleared: a configured proxy is a deliberate choice,
       // so it applies from the first attempt. An empty pool yields null, which
       // is exactly the old behaviour.
-      activeProxy = pickProxy(
-        settings.proxies,
-        excludedProxies,
-        settings.proxyRoutingMode,
-        settings.manualProxyIds,
-        target?.connection.baseUrl
-      );
+      activeProxy = pickProxyForSettings(settings, excludedProxies, target?.connection.baseUrl);
       if (target?.connection.format === "local") activeProxy = null;
       if (activeProxy) excludedProxies.add(activeProxy.id);
       if (!target) {
@@ -670,7 +664,7 @@ export async function chatStream(options: ChatStreamOptions): Promise<ChatStream
       if (attempt < maxAttempts - 1 && !streamedAny && !failure.stop) {
         // Retry another proxy only when the failure belongs to the route.
         const nextProxy = failure.rotateProxy && (!isAuto || excludedProxies.size < 3)
-          ? pickProxy(settings.proxies, excludedProxies, settings.proxyRoutingMode, settings.manualProxyIds, currentTarget.connection.baseUrl) : null;
+          ? pickProxyForSettings(settings, excludedProxies, currentTarget.connection.baseUrl) : null;
         if (nextProxy) {
           excludedProxies.add(nextProxy.id);
           activeProxy = nextProxy;
@@ -746,7 +740,7 @@ export async function runCompletion(options: CompletionOptions): Promise<string>
       target = resolve(
         model,
         settings.providers.filter(c => !providerPresetForUrl(c.baseUrl)?.requiresProxy ||
-          pickProxy(settings.proxies, new Set(), settings.proxyRoutingMode, settings.manualProxyIds, c.baseUrl)),
+          pickProxyForSettings(settings, new Set(), c.baseUrl)),
         excluded,
         options.messages,
         undefined,
@@ -759,13 +753,7 @@ export async function runCompletion(options: CompletionOptions): Promise<string>
       // Seeded rather than cleared: a configured proxy is a deliberate choice,
       // so it applies from the first attempt. An empty pool yields null, which
       // is exactly the old behaviour.
-      activeProxy = pickProxy(
-        settings.proxies,
-        excludedProxies,
-        settings.proxyRoutingMode,
-        settings.manualProxyIds,
-        target?.connection.baseUrl
-      );
+      activeProxy = pickProxyForSettings(settings, excludedProxies, target?.connection.baseUrl);
       if (target?.connection.format === "local") activeProxy = null;
       if (activeProxy) excludedProxies.add(activeProxy.id);
       if (!target) {
@@ -819,7 +807,7 @@ export async function runCompletion(options: CompletionOptions): Promise<string>
       if (attempt < maxAttempts - 1 && !failure.stop) {
         // Provider failures move to another model; route failures can change proxy.
         const nextProxy = failure.rotateProxy && (!isAuto || excludedProxies.size < 3)
-          ? pickProxy(settings.proxies, excludedProxies, settings.proxyRoutingMode, settings.manualProxyIds, currentTarget.connection.baseUrl) : null;
+          ? pickProxyForSettings(settings, excludedProxies, currentTarget.connection.baseUrl) : null;
         if (nextProxy) {
           excludedProxies.add(nextProxy.id);
           activeProxy = nextProxy;
@@ -941,7 +929,7 @@ export interface ProxyTestResult {
  */
 const PROXY_REACHABILITY_TARGET = "https://cloudflare.com/cdn-cgi/trace";
 
-/** Settings → Proxies "Test" button. `relayUrl` lets an unsaved draft be tested. */
+/** Explicit connection diagnostic. Tests the chosen proxy even when normal proxy routing is off. */
 export async function testProxyConnection(proxy: CustomProxy, relayUrl?: string, allowInsecureProxyTls?: boolean): Promise<ProxyTestResult> {
   const started = performance.now();
   try {
@@ -950,7 +938,8 @@ export async function testProxyConnection(proxy: CustomProxy, relayUrl?: string,
       { method: "GET", headers: { Accept: "text/plain" } },
       proxy,
       relayUrl,
-      allowInsecureProxyTls
+      allowInsecureProxyTls,
+      true
     );
     const latencyMs = Math.round(performance.now() - started);
     if (!res.ok) return { ok: false, status: res.status, latencyMs, error: `HTTP ${res.status}` };

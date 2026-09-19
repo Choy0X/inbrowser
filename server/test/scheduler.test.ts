@@ -4,11 +4,62 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { test } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import { loadConfig } from '../src/config.ts';
 import { SharedRedis, RedisLease } from '../src/redis.ts';
 import { CatalogRepository } from '../src/catalog/repository.ts';
 import { nextBoundary, normalizeCandidate } from '../src/catalog/model.ts';
 import { runCatalogJob, startCatalogScheduler } from '../src/catalog/scheduler.ts';
+
+test('first installation discovers once across processes, then restarts and Redis loss keep the schedule', async t => {
+  const state = await mkdtemp(join(tmpdir(), 'catalog-initial-'));
+  const config = loadConfig({REDIS_URL:process.env.TEST_REDIS_URL || 'redis://127.0.0.1:16380',REDIS_KEY_PREFIX:`test:initial:${randomUUID()}:`,RELAY_SECRET:'initial-discovery-test-secret-32-characters',FREE_PROXY_STATE_DIR:state});
+  const redis = new SharedRedis(config.redis); redis.start(); assert.ok(await redis.waitReady());
+  const repo = new CatalogRepository(redis,60,state);
+  const stops:(()=>void)[]=[];
+  const clear = async () => {
+    let cursor='0'; do { const page=await redis.command<[string,string[]]>('SCAN',cursor,'MATCH',redis.key('*'),'COUNT','100');cursor=page[0];if(page[1].length)await redis.command('DEL',...page[1]); } while(cursor!=='0');
+  };
+  let finish:()=>void=()=>{};
+  const pending=new Promise<void>(resolve=>{finish=resolve;});
+  t.after(async()=>{finish();stops.forEach(stop=>stop());await delay(50);await clear();await redis.close();await rm(state,{recursive:true,force:true});});
+  let collections=0;
+  const run:typeof runCatalogJob=(c,r,s,_io,lease)=>runCatalogJob(c,r,s,{collect:async()=>{collections++;await pending;return [];},check:async()=>null},lease);
+  stops.push(startCatalogScheduler(config,repo,run),startCatalogScheduler(config,repo,run));
+  for(let i=0;i<100&&collections===0;i++)await delay(10);
+  assert.equal(collections,1,'The first run starts without waiting for the hourly boundary');
+  assert.equal((await repo.status()).running,true);
+  finish();
+  for(let i=0;i<100&&(await repo.status()).running;i++)await delay(10);
+  assert.equal((await repo.status()).running,false);
+  assert.ok((await repo.status()).lastCompletedAt);
+  stops.forEach(stop=>stop());
+  // Losing all ephemeral keys must not turn an empty successful result into a
+  // brand-new installation. Only this fixture namespace is removed.
+  await clear();
+  stops.push(startCatalogScheduler(config,repo,run));
+  await delay(100);
+  assert.equal(collections,1,'The durable empty snapshot suppresses another startup run');
+});
+
+test('an interrupted initial discovery is attempted once and retried only on the scheduled boundary', async t => {
+  const state=await mkdtemp(join(tmpdir(),'catalog-initial-failed-'));
+  const config=loadConfig({REDIS_URL:process.env.TEST_REDIS_URL || 'redis://127.0.0.1:16380',REDIS_KEY_PREFIX:`test:initial-failed:${randomUUID()}:`,RELAY_SECRET:'initial-failure-test-secret-32-characters',FREE_PROXY_STATE_DIR:state});
+  const redis=new SharedRedis(config.redis);redis.start();assert.ok(await redis.waitReady());
+  const repo=new CatalogRepository(redis,60,state);const stops:(()=>void)[]=[];
+  t.after(async()=>{stops.forEach(stop=>stop());await delay(30);let cursor='0';do{const page=await redis.command<[string,string[]]>('SCAN',cursor,'MATCH',redis.key('*'),'COUNT','100');cursor=page[0];if(page[1].length)await redis.command('DEL',...page[1]);}while(cursor!=='0');await redis.close();await rm(state,{recursive:true,force:true});});
+  let attempts=0;
+  const run:typeof runCatalogJob=(c,r,s,_io,lease)=>runCatalogJob(c,r,s,{collect:async()=>{attempts++;throw new Error('fixture unavailable');},check:async()=>null},lease);
+  stops.push(startCatalogScheduler(config,repo,run));
+  for(let i=0;i<100&&attempts===0;i++)await delay(10);
+  assert.equal(attempts,1);
+  for(let i=0;i<100&&(await repo.status()).running;i++)await delay(10);
+  stops.forEach(stop=>stop());stops.push(startCatalogScheduler(config,repo,run));
+  await delay(100);assert.equal(attempts,1);
+  // A normal scheduler invocation still performs the next attempt.
+  await run(config,repo,new AbortController().signal);
+  assert.equal(attempts,2);
+});
 
 test('scheduler waits for configured boundary, skips overlap, and never catches up on reconnect', async t=>{
   t.mock.timers.enable({apis:['Date','setInterval'],now:1000});

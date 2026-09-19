@@ -241,9 +241,12 @@ Redis is an ephemeral shared store in the default installation: RDB snapshots
 and AOF are disabled. The server writes public catalog snapshots beneath
 `FREE_PROXY_STATE_DIR` (`/var/lib/inbrowser/catalog` with the installer). On
 recovery it can restore eligible snapshot records to Redis without network
-discovery. Empty or missing state does not trigger an unscheduled scan; the
-scheduler waits for its next configured boundary. Starter-prompt state is shared
-through Redis and generated on its own schedule, independent of visitors.
+discovery. A new installation with neither Redis catalog data nor a disk snapshot
+runs one initial collection as soon as Redis is available. Before outbound work,
+it writes a snapshot marker, even if the catalog is empty. Later restarts, Redis
+recovery, and failed or empty initial results use the configured schedule instead
+of launching another startup scan. Starter-prompt state is shared through Redis
+and generated on its own schedule, independent of visitors.
 
 ## Catalog verification and rollout
 
@@ -258,8 +261,9 @@ Deploy the compatible Worker first and verify its `/health` response includes
 `catalog: true`. Then copy the local, gitignored `install.sh` to the Debian host
 and provision its dedicated Redis service before starting this backend build.
 Keep the existing relay secret consistent between the Worker and app. Verify
-authenticated Redis readiness and the app's health, then let the next configured
-interval start collection. Public catalog requests cannot force that run.
+authenticated Redis readiness and the app's health. A new installation performs
+its initial collection automatically, followed by the configured interval
+boundaries. Public catalog requests cannot force either run.
 
 Before rolling back the app, preserve the catalog snapshot directory and Redis
 credentials. The Worker additions tolerate ordinary existing relay requests,

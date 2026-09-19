@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdir, open, rename, unlink } from 'node:fs/promises';
+import { access, mkdir, open, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { SharedRedis, RedisLease, RedisUnavailable } from '../redis.ts';
 import { eligible, matches, normalizeCandidate, scoreProxy, trigrams, type CatalogProxy, type CatalogQuery, type CatalogStatus, CatalogInputError, nextBoundary } from './model.ts';
@@ -236,6 +236,11 @@ export class CatalogRepository implements CatalogReader {
     }
   }
   async publish(records:CatalogProxy[],lease:RedisLease):Promise<void>{await this.activate(await this.createGeneration(records,lease),lease);}
+  /** Even an empty snapshot records the first collection attempt durably. */
+  async hasSnapshot():Promise<boolean>{
+    try{await access(join(this.stateDir,'catalog.json'));return true;}
+    catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return false;throw error;}
+  }
   /** Bounded NDJSON streaming avoids a second full serialized catalog in memory. */
   async saveSnapshot(records:CatalogProxy[],lease:RedisLease):Promise<void>{
     if(!await lease.renew())throw new RedisUnavailable();

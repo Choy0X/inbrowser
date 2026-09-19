@@ -21,7 +21,7 @@ test('canonical endpoint identity deduplicates feeds, not different protocols', 
   }
 });
 
-test('schedule boundaries never run immediately, including at startup on a boundary', () => {
+test('recurring schedule advances to the next boundary independently of initial discovery', () => {
   assert.equal(nextBoundary(0, 60), 3_600_000);
   assert.equal(nextBoundary(3_600_001, 60), 7_200_000);
 });

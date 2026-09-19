@@ -54,7 +54,7 @@ import { applyThemeColor } from "./lib/theme";
 import { runTool, toolDefs, toolsForTurn, type ToolContext } from "./lib/tools/registry";
 import { syncToolPlugins } from "./lib/tools/toolPlugins";
 import { RUN_CODE_SYSTEM_PROMPT } from "./lib/tools/codeTools";
-import { backupFilename, exportBackup, mergeById, parseBackup, restoreSkills } from "./lib/backup";
+import { backupFilename, exportBackup, mergeById, parseBackup, restoreSkills, restoreProxyMasterSetting } from "./lib/backup";
 import type { Preferences } from "./lib/preferences";
 import { promptScaleFor } from "./lib/promptScale";
 import { RICH_OUTPUT_SYSTEM_PROMPT } from "./lib/richOutput";
@@ -1511,6 +1511,7 @@ export default function App() {
       skills,
       providers: settings.providers,
       proxies: settings.proxies,
+      proxiesEnabled: settings.proxiesEnabled,
     });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -1520,7 +1521,7 @@ export default function App() {
     URL.revokeObjectURL(url);
   }, [preferences, tasks, skills, settings]);
 
-  /** Restores a backup by merging: an import never overwrites what is already here. */
+  /** Merge saved items, and restore the master proxy choice when the backup includes it. */
   const handleImportBackup = useCallback(
     async (file: File): Promise<string> => {
       const payload = parseBackup(await file.arrayBuffer());
@@ -1579,6 +1580,8 @@ export default function App() {
         }
         parts.push(`${merged.added} prox${merged.added === 1 ? "y" : "ies"}`);
       }
+      settingsNext = restoreProxyMasterSetting(settingsNext, payload);
+      if (typeof payload.proxiesEnabled === "boolean") parts.push(`proxy routing ${payload.proxiesEnabled ? "on" : "off"}`);
       if (settingsNext !== settings) {
         setSettings(settingsNext);
         saveSettings(settingsNext);

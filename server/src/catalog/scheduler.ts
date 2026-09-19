@@ -10,9 +10,9 @@ export interface CatalogJobIO { collect:typeof collectCandidates; check:typeof c
 const productionIO:CatalogJobIO={collect:collectCandidates,check:checkCandidate};
 
 /** Called only by the server scheduler. No public route imports this module. */
-export async function runCatalogJob(config:RelayConfig,repository:CatalogRepository,shutdown:AbortSignal,io:CatalogJobIO=productionIO):Promise<void>{
+export async function runCatalogJob(config:RelayConfig,repository:CatalogRepository,shutdown:AbortSignal,io:CatalogJobIO=productionIO,heldLease?:RedisLease):Promise<void>{
   if(isPlaceholderSecret(config.relaySecret)||shutdown.aborted)return;
-  const lease=await RedisLease.acquire(repository.redis,'catalog-job');if(!lease)return;
+  const lease=heldLease??await RedisLease.acquire(repository.redis,'catalog-job');if(!lease)return;
   const controller=new AbortController();const signal=AbortSignal.any([lease.signal,shutdown,controller.signal]);
   const settings=config.freeProxyCatalog;let lastCompletedAt:number|null=null;
   const setStatus=(running:boolean,lastCompletedAt:number|null,lastError?:string)=>lease.setJson('catalog:status',{running,lastCompletedAt,nextRunAt:nextBoundary(Date.now(),settings.intervalMinutes),...(lastError?{lastError}:{})},settings.intervalMinutes*180);
@@ -20,6 +20,10 @@ export async function runCatalogJob(config:RelayConfig,repository:CatalogReposit
     lastCompletedAt=(await repository.status()).lastCompletedAt;
     await setStatus(true,lastCompletedAt);
     const previous=await repository.all();
+    // Record the first attempt before outbound work. An empty or interrupted
+    // initial run must not become a new startup scan after Redis loss/restart.
+    if(!await repository.hasSnapshot())await repository.saveSnapshot(previous,lease);
+    signal.throwIfAborted();
     const found=await io.collect(config.relaySecret,signal,settings.maxCandidates,previous);
     signal.throwIfAborted();
     const old=new Map(previous.map(p=>[p.id,p]));
@@ -58,7 +62,7 @@ export async function runCatalogJob(config:RelayConfig,repository:CatalogReposit
   }catch(error){
     controller.abort();
     if(!lease.signal.aborted)await setStatus(false,lastCompletedAt,error instanceof DiscoveryUnavailable?'relay_unavailable':'collection_interrupted').catch(()=>{});
-  }finally{controller.abort();await lease.release();}
+  }finally{controller.abort();if(!heldLease)await lease.release();}
 }
 
 export function startCatalogScheduler(config:RelayConfig,repository:CatalogRepository,runJob=runCatalogJob):()=>void{
@@ -70,8 +74,18 @@ export function startCatalogScheduler(config:RelayConfig,repository:CatalogRepos
     try{
       if(await repository.manifest())return;
       const lease=await RedisLease.acquire(repository.redis,'catalog-job');if(!lease)return;
-      try{await repository.restore(lease);}finally{await lease.release();}
-    }catch{/* Shared state recovery waits for the next timer; no network discovery. */}
+      try{
+        await repository.restore(lease);
+        // Only a genuinely new installation gets an immediate collection.
+        // The same lease spans restoration, the durable marker and discovery,
+        // preventing a second primary from racing the initial run.
+        if(!controller.signal.aborted&&!isPlaceholderSecret(config.relaySecret)&&!await repository.hasSnapshot()&&!await repository.manifest()){
+          busy=true;
+          try{await runJob(config,repository,controller.signal,productionIO,lease);}
+          finally{busy=false;}
+        }
+      }finally{await lease.release();}
+    }catch{/* Recovery waits for the next timer. Existing snapshots never trigger a scan. */}
     finally{restoring=false;}
   };
   const tick=()=>{

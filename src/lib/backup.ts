@@ -1,4 +1,5 @@
 import { zipSync, unzipSync, strToU8, strFromU8 } from "fflate";
+import type { GatewaySettings } from "./gatewaySettings";
 import type { Conversation, CustomProxy, ProviderConnection } from "./types";
 import { parseProxyObject } from "./gateway/freeProxyList";
 import type { Preferences } from "./preferences";
@@ -44,6 +45,8 @@ export interface BackupPayload {
   skills?: (Skill & { resources?: SkillResource[] })[];
   providers?: BackedUpProvider[];
   proxies?: BackedUpProxy[];
+  /** Optional for compatibility with older backups. */
+  proxiesEnabled?: boolean;
 }
 
 export interface BackupContents {
@@ -53,6 +56,7 @@ export interface BackupContents {
   skills?: (Skill & { resources?: SkillResource[] })[];
   providers?: ProviderConnection[];
   proxies?: CustomProxy[];
+  proxiesEnabled?: boolean;
 }
 
 /** Build a compressed backup archive. Skill resource bodies are pulled from IndexedDB. */
@@ -76,6 +80,7 @@ export async function exportBackup(contents: BackupContents): Promise<Blob> {
     skills,
     providers,
     proxies,
+    proxiesEnabled: typeof contents.proxiesEnabled === "boolean" ? contents.proxiesEnabled : undefined,
   };
 
   const zipped = zipSync({ [ENTRY]: strToU8(JSON.stringify(payload)) }, { level: 6 });
@@ -115,6 +120,13 @@ export function parseBackup(input: ArrayBuffer | Uint8Array): BackupPayload {
     throw new Error(`This backup was made by a newer version of ${APP_NAME} (format ${parsed.version}).`);
   }
   return parsed;
+}
+
+/** Older backups leave the current master choice alone; explicit booleans restore it. */
+export function restoreProxyMasterSetting(settings: GatewaySettings, payload: Pick<BackupPayload, "proxiesEnabled">): GatewaySettings {
+  return typeof payload.proxiesEnabled === "boolean" && payload.proxiesEnabled !== settings.proxiesEnabled
+    ? { ...settings, proxiesEnabled: payload.proxiesEnabled }
+    : settings;
 }
 
 export interface MergeResult<T> {

@@ -51,6 +51,8 @@ export interface GatewaySettings {
   providers: ProviderConnection[];
   /** Global pool of user-owned proxies, direct mode only. See gateway/proxyRouting.ts. */
   proxies: CustomProxy[];
+  /** Master routing switch. Individual proxy configuration remains intact when off. */
+  proxiesEnabled: boolean;
   /** How pickProxy() picks among `proxies` - see ProxyRoutingMode. */
   proxyRoutingMode: ProxyRoutingMode;
   /** Proxy ids checked for use when proxyRoutingMode === "manual" (multi-select). */
@@ -68,6 +70,7 @@ export function defaultSettings(): GatewaySettings {
     omniroute: { baseUrl: DEFAULT_OMNIROUTE_URL, apiKey: "" },
     providers: [],
     proxies: [],
+    proxiesEnabled: true,
     proxyRoutingMode: "auto",
     manualProxyIds: [],
     relayUrl: "",
@@ -87,6 +90,7 @@ export function getSettings(): GatewaySettings {
         omniroute: { ...defaults.omniroute, ...parsed.omniroute },
         providers: Array.isArray(parsed.providers) ? parsed.providers : [],
         proxies: migrateProxies(parsed.proxies).proxies,
+        proxiesEnabled: parsed.proxiesEnabled !== false,
         proxyRoutingMode:
           parsed.proxyRoutingMode === "manual" || parsed.proxyRoutingMode === "order"
             ? parsed.proxyRoutingMode

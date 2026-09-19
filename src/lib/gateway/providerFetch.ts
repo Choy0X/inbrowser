@@ -1,4 +1,5 @@
 import type { CustomProxy } from "../types";
+import { getSettings } from "../gatewaySettings";
 import { STREAM_IDLE_TIMEOUT_MS } from "../appConfig";
 import { providerPresetForUrl } from "./providerPresets";
 import { GatewayError } from "./types";
@@ -50,18 +51,17 @@ export async function providerFetch(
   targetUrl: string,
   init?: RequestInit,
   proxy?: CustomProxy,
-  /**
-   * Relay override. Only the Settings "Test" button passes this, so an unsaved
-   * draft relay URL can be tried before it is committed; everything else omits
-   * it and `getRelayUrl()` resolves the saved setting or the app default.
-   */
+  /** Deprecated relay argument retained for call compatibility; deployment config wins. */
   relayUrl?: string,
   /** Unsaved global TLS preference for Settings tests; otherwise use the saved choice. */
-  allowInsecureProxyTls?: boolean
+  allowInsecureProxyTls?: boolean,
+  /** Only an explicit Test proxy diagnostic bypasses the master routing switch. */
+  explicitProxyTest = false
 ): Promise<Response> {
+  if (proxy && !explicitProxyTest && getSettings().proxiesEnabled === false) proxy = undefined;
   const preset = providerPresetForUrl(targetUrl);
   if (preset?.requiresProxy && !proxy) {
-    throw new GatewayError(400, `${preset.label} requires a configured proxy. Select one in Settings > Proxies.`, false, undefined, "proxy_required");
+    throw new GatewayError(400, `${preset.label} requires proxies to be enabled and a proxy selected in Settings > Proxies.`, false, undefined, "proxy_required");
   }
   const headers = new Headers(init?.headers);
   if (typeof init?.body === "string" && !headers.has("Content-Type")) {

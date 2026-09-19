@@ -460,6 +460,7 @@ export function SettingsModal({
   const [draftOmniRoute, setDraftOmniRoute] = useState<OmniRouteConnectionSettings>(settings.omniroute);
   const [draftProviders, setDraftProviders] = useState<ProviderConnection[]>(settings.providers);
   const [draftProxies, setDraftProxies] = useState<CustomProxy[]>(settings.proxies);
+  const [draftProxiesEnabled, setDraftProxiesEnabled] = useState(settings.proxiesEnabled !== false);
   const [draftProxyMode, setDraftProxyMode] = useState<ProxyRoutingMode>(settings.proxyRoutingMode);
   const [draftManualProxyIds, setDraftManualProxyIds] = useState<string[]>(settings.manualProxyIds);
   const [draftAllowInsecureProxyTls, setDraftAllowInsecureProxyTls] = useState(settings.allowInsecureProxyTls);
@@ -500,6 +501,7 @@ export function SettingsModal({
       setDraftOmniRoute(settings.omniroute);
       setDraftProviders(settings.providers);
       setDraftProxies(settings.proxies);
+      setDraftProxiesEnabled(settings.proxiesEnabled !== false);
       setDraftProxyMode(settings.proxyRoutingMode);
       setDraftManualProxyIds(settings.manualProxyIds);
       setDraftAllowInsecureProxyTls(settings.allowInsecureProxyTls);
@@ -825,6 +827,7 @@ export function SettingsModal({
       omniroute: draftOmniRoute,
       providers,
       proxies: draftProxies,
+      proxiesEnabled: draftProxiesEnabled,
       proxyRoutingMode: draftProxyMode,
       manualProxyIds: draftManualProxyIds,
       relayUrl: "",
@@ -1402,6 +1405,14 @@ export function SettingsModal({
 
           {tab === "proxies" && (
             <div>
+              <div className="mb-4 flex items-start justify-between gap-4 rounded-lg border border-border-subtle bg-canvas p-4">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium">Use proxy servers</div>
+                  <p className="mt-1 text-xs leading-5 text-fg-dim">Turn proxy routing on or off for chat, model discovery, search, and media. When off, connections go directly to providers. Your saved proxies and individual choices are kept.</p>
+                  <p className="mt-1 text-xs leading-5 text-fg-faint">Save Settings to apply this change. Browsing the catalog and testing an individual proxy remain available while routing is off.</p>
+                </div>
+                <Toggle label="Use proxy servers" checked={draftProxiesEnabled} onChange={setDraftProxiesEnabled} />
+              </div>
               <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                 <span className="text-sm font-medium">
                   Custom proxy servers
@@ -1878,7 +1889,7 @@ export function SettingsModal({
             return <>
               <Button size="sm" loading={test.status === "testing"} disabled={!selectedProxy.host || !isValidPort(selectedProxy.port)} onClick={() => void runProxyTest(selectedProxy)} icon={<RefreshCw size={14} />}>Test proxy</Button>
               <p className={`mt-2 break-words text-xs ${test.status === "fail" ? "text-error" : test.status === "ok" ? "text-success" : "text-fg-faint"}`}>
-                {test.status === "ok" ? `Reachable. Exit IP: ${test.result.exitIp ?? "unknown"}. ${test.result.latencyMs} ms.` : test.status === "fail" ? `Failed: ${test.message}` : test.status === "testing" ? "Testing connection..." : "Test this proxy's connection."}
+                {test.status === "ok" ? `Reachable. Exit IP: ${test.result.exitIp ?? "unknown"}. ${test.result.latencyMs} ms.` : test.status === "fail" ? `Failed: ${test.message}` : test.status === "testing" ? "Testing connection..." : "Test this proxy's connection, even when proxy routing is turned off."}
               </p>
             </>;
           })()}

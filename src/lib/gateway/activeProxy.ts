@@ -15,20 +15,23 @@
  * proxy.
  */
 import type { CustomProxy } from "../types";
-import { getSettings } from "../gatewaySettings";
+import { getSettings, type GatewaySettings } from "../gatewaySettings";
 import { pickProxy } from "./proxyRouting";
 
 const NONE_EXCLUDED: ReadonlySet<string> = new Set<string>();
 
+/** Every ordinary gateway selection uses the master switch, including passed drafts. */
+export function pickProxyForSettings(
+  settings: Pick<GatewaySettings, "mode" | "proxiesEnabled" | "proxies" | "proxyRoutingMode" | "manualProxyIds">,
+  excluded: Set<string>,
+  targetUrl?: string
+): CustomProxy | null {
+  if (settings.mode !== "direct" || settings.proxiesEnabled === false || settings.proxies.length === 0) return null;
+  return pickProxy(settings.proxies, excluded, settings.proxyRoutingMode, settings.manualProxyIds, targetUrl);
+}
+
 export function getActiveProxy(): CustomProxy | null {
-  const settings = getSettings();
-  if (settings.mode !== "direct" || settings.proxies.length === 0) return null;
-  return pickProxy(
-    settings.proxies,
-    NONE_EXCLUDED as Set<string>,
-    settings.proxyRoutingMode,
-    settings.manualProxyIds
-  );
+  return pickProxyForSettings(getSettings(), NONE_EXCLUDED as Set<string>);
 }
 
 /** Convenience for the many call sites that want `proxy?: CustomProxy`. */
