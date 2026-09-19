@@ -83,6 +83,21 @@
     "clusterWorkers": 1,
     "_clusterWorkers": "CLUSTER_WORKERS. Worker processes sharing the listening socket. 1 keeps everything in one process. 0 sizes to the box. The motive is not throughput: most CPU at this concurrency goes on per-message work for streamed replies, so a single process means one garbage collection pause stalls every live stream at once. Development always forces 1.",
     "poolTunnels": false,
-    "_poolTunnels": "POOL_TUNNELS=1. Reuse a tunnel across requests. Off by default and best left that way - measured hit rate is about 7.5% in the most favourable case and near zero for the workloads that matter, and it is the one setting that affects request isolation. Read the header of server/src/tunnelPool.ts before enabling it."
+    "_poolTunnels": "POOL_TUNNELS=1. Reuse a tunnel across requests. Off by default and best left that way - measured hit rate is about 7.5% in the most favourable case and near zero for the workloads that matter, and it is the one setting that affects request isolation. Read the header of server/src/tunnelPool.ts before enabling it.",
+    "redis": {
+      "url": "redis://127.0.0.1:6380",
+      "keyPrefix": "inbrowser:v1:",
+      "commandTimeoutMs": 1000
+    },
+    "_redis": "Server only. REDIS_URL, REDIS_PASSWORD (environment only), REDIS_KEY_PREFIX, REDIS_COMMAND_TIMEOUT_MS. Redis is required for new proxy requests and catalog reads.",
+    "freeProxyCatalog": {
+      "intervalMinutes": 60,
+      "stateDir": "server/state/catalog",
+      "maxCandidates": 100000,
+      "concurrency": 256,
+      "startsPerSecond": 20,
+      "enabled": true
+    },
+    "_freeProxyCatalog": "Server-only scheduled collection. FREE_PROXY_INTERVAL_MINUTES changes the full job cadence after restart. FREE_PROXY_STATE_DIR stores public snapshots; FREE_PROXY_CATALOG_DISABLED=1 disables collection. No public request starts a job."
   }
 }

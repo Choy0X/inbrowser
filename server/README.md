@@ -1,8 +1,10 @@
 # The InBrowser server
 
-One Fastify process doing two jobs: it serves the built client from `dist/`, and
-it forwards proxied requests to the Cloudflare Worker that dials the user's proxy
-(that Worker lives in its own repository, `inbrowser-relay`).
+The Fastify server serves the built client from `dist/`, forwards proxied
+requests to the Cloudflare Worker that dials the user's proxy, and exposes shared
+starter prompts and a scheduled public proxy catalog. The Worker lives in the
+`inbrowser-relay` repository. Production can run multiple Node workers, with
+Redis coordinating shared state and rate limits.
 
 Serving both from one origin is the point. It removes CORS and the `X-Relay-Meta`
 preflight, removes the relay URL the client would otherwise have to be told, and
@@ -10,8 +12,9 @@ puts the cross-origin-isolation headers in one place instead of several that can
 drift.
 
 The relay route is only reached when a user configures a proxy. With none
-configured, the browser still calls providers directly and this process is only
-a web server.
+configured, the browser still calls providers directly. Catalog and starter
+prompt requests can still reach the server, and background catalog maintenance
+runs independently of visitor traffic.
 
 ## What it can see
 
@@ -31,13 +34,19 @@ What follows are rules, not preferences. `npm run verify:relay` asserts the firs
 and last of them.
 
 - **Never log a request field.** No access log with the target, no dump of
-  `X-Relay-Meta`, no error log carrying a header or URL. The only thing written to
-  stdout is the listening line.
-- **Persist nothing.** No disk, no database, no cache. Memory only, for the life
-  of the request.
+  `X-Relay-Meta`, no error log carrying a header or URL. Application diagnostics
+  contain operational categories rather than request
+  contents. Preserve the deployment's `X-Relay-Meta` access-log filter as well.
+- **Never persist relayed content or credentials.** Provider API keys, user
+  proxy passwords, request bodies, response bodies, and raw visitor IP addresses
+  do not belong in Redis or catalog snapshots. Redis holds public catalog data,
+  shared starter prompts, scheduler coordination, and short-lived rate counters
+  keyed by an HMAC of the client identifier. The HMAC is pseudonymous, not a
+  claim of anonymity. Disk snapshots contain public proxy endpoints, provenance,
+  and check results only; public proxy IPs are distinct from visitor IPs.
 - **Dependencies are an allowlist, not an accident.** `fastify`,
-  `@fastify/static` and `@fastify/middie`, pinned exact; `verify:relay` fails on a
-  fourth or on an unpinned range. This replaced a real guarantee - the relay used
+  `@fastify/static`, `@fastify/middie`, and `redis` are pinned exactly;
+  `verify:relay` rejects unreviewed imports and unpinned versions. The relay used
   to import nothing outside `node:*` - so what protects the hot path now is
   structural instead: `/v1/fetch` hijacks the reply, and no parser, serializer,
   hook or logger reads the body, the credentials in `X-Relay-Meta`, or the
@@ -99,11 +108,11 @@ the environment variable named beside it, and the environment wins.
 npm install
 npm run build          # typecheck, client -> dist/, server -> server/dist/relay.cjs
 
-# config.json already points workerUrl at the deployed worker, so in practice
-# the secret is the only thing you must supply. Set it here rather than in the
-# file: config.json is committed, so a secret written into it is public, and the
-# server refuses to proxy with a placeholder.
+# Use the same relay secret as the deployed worker, plus a running Redis.
+# Keep both secrets outside config.json, which is committed to the repository.
 export RELAY_SECRET="<the same value the worker was deployed with>"
+export REDIS_URL="redis://127.0.0.1:6380"
+export REDIS_PASSWORD="<the dedicated Redis password>"
 npm start
 ```
 
@@ -117,10 +126,14 @@ use the `wss://` scheme and end in `/v1` - that is the only path the worker
 accepts a tunnel on; `/health` is for the Settings test button and everything
 else 404s.
 
-Deploying needs `dist/`, `server/dist/relay.cjs`, **`config.json`** and Node 22+
+Deploying needs `dist/`, `server/dist/relay.cjs`, **`config.json`**, Node 22+,
+Redis 7+, and a writable catalog state directory
 - **no `node_modules` on the host**, because the server bundle
 is self-contained. On a Debian VPS, `../install.sh` does all of this including
-Caddy, the firewall and a sandboxed systemd unit.
+Caddy, the firewall, a dedicated Redis service, and a sandboxed app systemd unit.
+See [INSTALL-REDIS.md](INSTALL-REDIS.md) for credentials, permissions, memory
+limits, recovery, and safe checks. The installer gives the app write access only
+to `/var/lib/inbrowser` for catalog snapshots.
 `config.json` is read at runtime, so changing a `server` value needs a restart
 but not a rebuild.
 
@@ -159,8 +172,10 @@ the Worker provides on the egress side.
 
 | Route | Purpose |
 |---|---|
-| `GET /health` | `{ok, version}`. Used by the Test relay button in Settings. |
+| `GET /health` | `{ok, version}`. Lightweight process liveness for operators. |
 | `POST /v1/fetch` | The proxied request. Everything descriptive is in the `X-Relay-Meta` header (base64url JSON: target, method, headers, proxy); the body streams through untouched. |
+| `GET /v1/suggestions` | Reads the shared, scheduled starter-prompt pool. Never generates prompts on demand. |
+| `/v1/free-proxies` and its subroutes | Reads catalog status, search results, best available records, and records selected by existing catalog IDs. Never starts discovery or accepts arbitrary proxy targets for checking. |
 | `GET /*` | The built client, with Range and 304 support and cross-origin-isolation headers on every response. Unknown paths fall back to `index.html` - **except** `/v1/`, `/health` and the runtime-asset prefixes, which 404. A missing engine asset answered with HTML reaches the runtime as a wasm module and throws a `CompileError` starting `<!do`, which is a genuinely hard failure to trace. |
 
 `X-Relay-Meta` is a header rather than query parameters because the payload
@@ -194,6 +209,58 @@ deletes `request>headers>X-Relay-Meta`; that header contains proxy credentials.
 | Max body | 32 MiB | `MAX_BODY_BYTES` |
 | Provider timeout | 120 s | - |
 
-The rate limiter is an in-memory fixed window, which is right for a single process
-behind one Cloudflare zone. Running more than one process would need a shared
-counter; `rateLimited()` in `src/index.ts` is where that goes.
+Rate limits use atomic Redis counters shared across workers. Each counter expires
+after its one-minute window. Keys use an HMAC derived from the relay secret rather
+than a raw visitor IP; the app still processes the client address to compute the
+counter key. These counters are operational state, not conversation history.
+
+If Redis is unavailable, new proxy requests fail with 503 instead of bypassing
+shared admission controls. Already established streams continue; Redis is not
+consulted for each stream chunk. Catalog reads report unavailability rather than
+starting a browser or server scan.
+
+## Scheduled public proxy catalog
+
+`config.json` controls the interval at
+`server.freeProxyCatalog.intervalMinutes`, defaulting to 60 minutes. The
+`FREE_PROXY_INTERVAL_MINUTES` environment variable overrides it. Restart the app
+after changing runtime configuration. Background discovery and validation use
+the fixed `relay.inbrowser.tech` Worker, independent of a visitor's relay or
+proxy settings. Source searches, repository enumeration, list downloads, and
+proxy checks all use this relay path. A deployment needs the compatible Worker
+catalog-source endpoint as well as its tunnel endpoint.
+
+Browser catalog requests only read published state. Opening Settings, searching,
+loading another page, choosing a best proxy, and resolving saved IDs never start
+or accelerate a scan. A Redis lease coordinates background ownership across
+workers and processes. A successfully checked record describes a past result;
+public proxies can disappear or fail later, and a catalog listing is not a
+privacy or availability guarantee.
+
+Redis is an ephemeral shared store in the default installation: RDB snapshots
+and AOF are disabled. The server writes public catalog snapshots beneath
+`FREE_PROXY_STATE_DIR` (`/var/lib/inbrowser/catalog` with the installer). On
+recovery it can restore eligible snapshot records to Redis without network
+discovery. Empty or missing state does not trigger an unscheduled scan; the
+scheduler waits for its next configured boundary. Starter-prompt state is shared
+through Redis and generated on its own schedule, independent of visitors.
+
+## Catalog verification and rollout
+
+Run `node --test server/test/*.test.ts` with a disposable Redis 7 instance at
+`redis://127.0.0.1:16380`, or set `TEST_REDIS_URL`. Tests isolate their keys and
+do not flush the database. `CATALOG_BENCHMARK=1` enables the large catalog
+benchmark; allow at least 512 MiB for that disposable instance. The separate
+memory-pressure test requires its own disposable Redis process and the explicit
+opt-in variables documented in `test/redis-memory-pressure.test.ts`.
+
+Deploy the compatible Worker first and verify its `/health` response includes
+`catalog: true`. Then copy the local, gitignored `install.sh` to the Debian host
+and provision its dedicated Redis service before starting this backend build.
+Keep the existing relay secret consistent between the Worker and app. Verify
+authenticated Redis readiness and the app's health, then let the next configured
+interval start collection. Public catalog requests cannot force that run.
+
+Before rolling back the app, preserve the catalog snapshot directory and Redis
+credentials. The Worker additions tolerate ordinary existing relay requests,
+so they can remain deployed while the app is rolled back.

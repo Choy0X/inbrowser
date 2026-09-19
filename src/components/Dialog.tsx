@@ -1,6 +1,65 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
+
+// Only the topmost modal handles keys and focus. Lower panels are inert.
+const modalStack: HTMLElement[] = [];
+let previousBodyOverflow = "";
+export function useModalFocus(panelRef: RefObject<HTMLDivElement>, open: boolean, onClose: () => void) {
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    if (!open || !panelRef.current) return;
+    const panel = panelRef.current;
+    const restore = document.activeElement;
+    if (!modalStack.length) {
+      previousBodyOverflow = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+    }
+    modalStack.push(panel);
+    const sync = () => modalStack.forEach((entry, index) => {
+      const hidden = index !== modalStack.length - 1;
+      entry.inert = hidden;
+      if (hidden) entry.setAttribute("aria-hidden", "true"); else entry.removeAttribute("aria-hidden");
+    });
+    sync();
+    if (!panel.contains(document.activeElement)) panel.focus();
+    const top = () => modalStack[modalStack.length - 1] === panel;
+    const onFocus = (event: FocusEvent) => {
+      if (top() && !panel.contains(event.target as Node)) panel.focus();
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (!top()) return;
+      if (event.key === "Escape") {
+        event.preventDefault(); event.stopImmediatePropagation(); closeRef.current(); return;
+      }
+      if (event.key !== "Tab") return;
+      const elements = Array.from(panel.querySelectorAll<HTMLElement>('button, [href], input, select, textarea, [tabindex]'))
+        .filter(element => element.tabIndex >= 0 && !element.matches(':disabled') && !element.closest('[inert]') && element.getClientRects().length > 0);
+      const first = elements[0]; const last = elements[elements.length - 1];
+      if (!first) { event.preventDefault(); panel.focus(); return; }
+      if (document.activeElement === panel || !panel.contains(document.activeElement)) {
+        event.preventDefault(); (event.shiftKey ? last : first).focus();
+      } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault(); last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault(); first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey, true);
+    document.addEventListener("focusin", onFocus, true);
+    return () => {
+      document.removeEventListener("keydown", onKey, true);
+      document.removeEventListener("focusin", onFocus, true);
+      const index = modalStack.indexOf(panel);
+      if (index >= 0) modalStack.splice(index, 1);
+      panel.inert = false; panel.removeAttribute("aria-hidden"); sync();
+      if (!modalStack.length) document.body.style.overflow = previousBodyOverflow;
+      if (restore instanceof HTMLElement && restore.isConnected && !restore.closest('[inert]')) restore.focus();
+      else modalStack[modalStack.length - 1]?.focus();
+    };
+  }, [open, panelRef]);
+}
 
 /**
  * Accessible modal dialog. Provides an overlay, focus trap, Esc-to-close,
@@ -16,6 +75,7 @@ export function Dialog({
   closeOnOverlay = false,
   showCloseButton = true,
   size = "md",
+  footer,
 }: {
   open: boolean;
   onClose: () => void;
@@ -26,52 +86,12 @@ export function Dialog({
   showCloseButton?: boolean;
   /** Panel width: "md" (default, ~28rem) for a form/confirm; "xl" (~48rem) for a wide list/table. */
   size?: "md" | "xl";
+  footer?: React.ReactNode;
 }) {
   const sizeClass = size === "xl" ? "max-w-3xl" : "max-w-md";
   const panelRef = useRef<HTMLDivElement>(null);
-  const restoreRef = useRef<Element | null>(null);
   const titleId = useRef<string>(`dialog-${Math.random().toString(36).slice(2)}`);
-
-  useEffect(() => {
-    if (!open) return;
-    // Remember what had focus so we can restore it when closing.
-    restoreRef.current = document.activeElement;
-    return () => {
-      const toRestore = restoreRef.current;
-      if (toRestore && toRestore instanceof HTMLElement) toRestore.focus();
-    };
-  }, [open]);
-
-  useEffect(() => {
-    if (!open) return;
-    const panel = panelRef.current;
-    if (panel) panel.focus();
-
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        onClose();
-        return;
-      }
-      if (e.key !== "Tab" || !panel) return;
-      // Simple focus trap within the dialog.
-      const focusables = panel.querySelectorAll<HTMLElement>(
-        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
-      );
-      if (focusables.length === 0) return;
-      const first = focusables[0];
-      const last = focusables[focusables.length - 1];
-      if (e.shiftKey && document.activeElement === first) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && document.activeElement === last) {
-        e.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener("keydown", onKey, true);
-    return () => document.removeEventListener("keydown", onKey, true);
-  }, [open, onClose]);
+  useModalFocus(panelRef, open, onClose);
 
   if (!open) return null;
 
@@ -82,7 +102,7 @@ export function Dialog({
   // descendants — clipping/misplacing the overlay instead of covering the
   // real viewport.
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4">
       <div
         className="fixed inset-0 bg-overlay/60"
         onClick={closeOnOverlay ? onClose : undefined}
@@ -94,9 +114,9 @@ export function Dialog({
         aria-modal="true"
         aria-labelledby={titleId.current}
         tabIndex={-1}
-        className={`relative z-10 mt-24 mb-16 w-full ${sizeClass} rounded-2xl border border-border bg-bg-elevated shadow-lift outline-none`}
+        className={`relative z-10 flex max-h-[calc(100dvh-1rem)] w-full ${sizeClass} flex-col overflow-hidden rounded-lg border border-border bg-bg-elevated shadow-lift outline-none sm:max-h-[calc(100dvh-2rem)]`}
       >
-        <div className="flex items-center justify-between border-b border-border px-5 py-3.5">
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-3 sm:px-5">
           <h2 id={titleId.current} className="text-base font-medium">
             {title}
           </h2>
@@ -105,13 +125,14 @@ export function Dialog({
               type="button"
               onClick={onClose}
               aria-label="Close"
-              className="rounded-full border border-border bg-canvas p-1.5 text-fg-dim hover:bg-bg-hover hover:text-fg"
+              className="flex min-h-11 min-w-11 items-center justify-center rounded-full border border-border bg-canvas p-1.5 text-fg-dim hover:bg-bg-hover hover:text-fg"
             >
               <X size={16} />
             </button>
           )}
         </div>
-        <div className="px-5 py-4">{children}</div>
+        <div className="min-h-0 overflow-y-auto overscroll-contain px-4 py-4 sm:px-5">{children}</div>
+        {footer && <div className="shrink-0 border-t border-border px-4 py-3 sm:px-5">{footer}</div>}
       </div>
     </div>,
     document.body

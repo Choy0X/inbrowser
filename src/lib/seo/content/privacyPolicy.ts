@@ -36,23 +36,23 @@ export function privacyPolicySections(brand: PolicyBrand): PolicySection[] {
   const app = brand.name;
   return [
     {
-      title: "No backend, no accounts",
+      title: "Browser storage, no accounts",
       paragraphs: [
-        `${app} runs entirely in your browser tab. Nothing here requires an account or sign-up, and no server of ours receives, stores, or logs your conversations, files, or usage. To be exact rather than absolute: a server of ours does serve you this page, so it sees the request for the page itself, the way any web server does. What it does not see is anything you do afterwards - your chats, your files and your settings never leave your browser. There are two narrow exceptions, both described below: the starter prompts on the empty chat screen, and the optional proxy relay, which is used only if you choose to configure a proxy yourself.`,
+        `${app} keeps your conversation history, files, and settings in your browser and does not require an account. Network features still send requests: AI providers receive the content you ask them to process, our server serves the app, starter prompts, and the public proxy catalog, and the optional relay forwards provider requests when you configure a proxy. Those paths and the site's analytics are described below.`,
       ],
     },
     {
       title: "The starter prompts on the empty screen",
       paragraphs: [
         `The suggestions on the empty chat screen refresh once a day, so your browser asks a server of ours for them. That request carries two things: whether it is currently morning, afternoon, evening or night where you are, and up to three yes/no flags for what your selected model can do - whether it can look at images, run tools, and reason at length. They are there so you are not offered a prompt about a photo on a model that cannot see one.`,
-        `It carries nothing else. No account, no identifier, no cookie, nothing about your conversations or your files, and not even the date. The list you receive is the same list everyone with the same model abilities receives at that hour; it is not built from anything you have done. ${app} writes the result into your browser's storage so the screen still works offline, and that copy never goes anywhere.`,
-        `The prompts themselves are written once a day by ${app}'s server, not per visitor, and your request never causes one to be written - it only reads the copy already in memory. If you would rather your browser made no such request at all, whoever deployed this copy of ${app} can switch the feature off, and a version with it off simply shows the screen without suggestions.`,
+        `The suggestion payload includes no account identifier, conversation content, files, or date. Like other web requests, it still exposes connection information to the services handling it. The list is selected from shared prompts for the same model abilities and time of day; it is not built from your activity. ${app} also saves the result in your browser's storage so the screen can work offline.`,
+        `The prompts themselves are generated once a day by ${app}'s server and held in shared server state, not generated per visitor. Your request only reads the existing pool. Whoever deploys this copy of ${app} can disable starter prompts entirely.`,
       ],
     },
     {
-      title: "Everything is stored locally",
+      title: "Your history and settings are stored locally",
       paragraphs: [
-        `Conversations, skills, memories, scheduled tasks, and settings are all saved in your browser's own storage (IndexedDB, localStorage, OPFS, and Cache Storage). None of it is transmitted anywhere by ${app}. You are always in control: delete a single conversation, clear all chats, or remove individual memories at any time.`,
+        `Conversations, skills, memories, scheduled tasks, and settings are saved in your browser's own storage (IndexedDB, localStorage, OPFS, and Cache Storage). Content needed for a network feature, such as a message sent to an AI provider, leaves the browser when you use that feature. You can delete a conversation, clear all chats, or remove individual memories at any time.`,
       ],
     },
     {
@@ -65,9 +65,17 @@ export function privacyPolicySections(brand: PolicyBrand): PolicySection[] {
       title: "The optional proxy relay",
       paragraphs: [
         "If you configure a proxy in Settings, requests take a different path, because a browser cannot speak the protocols real proxies use. They are sent to the same server that served you this page, which opens a tunnel through a Cloudflare worker out to the proxy you chose. Two components, and they see very different things.",
-        "The worker sees nothing readable. Your proxy's address and credentials are encrypted before they leave the relay, and everything after that is the encrypted connection to the provider, which the worker has no key for. It exists so that the proxy operator sees a Cloudflare address rather than any machine of ours.",
-        "The relay itself does see your requests. It establishes the secure connection to the provider on your behalf, so the request, the response, and any API key it carries pass through it in readable form. There is no way around that: whichever machine assembles the request necessarily sees what is in it. What we can tell you is what it does with them, which is nothing - it keeps no logs, writes nothing to disk, and holds a request only for as long as it takes to forward it. The relay address is also a setting, so you can point it at one you run yourself rather than ours.",
-        "None of this applies until you add a proxy. With no proxy configured the relay is never contacted, and your requests go straight from your browser to the provider you picked.",
+        "The proxy address, credentials, and dial destination are encrypted in transit between the relay and the worker. The worker decrypts this connection information to open and authenticate the proxy connection. The HTTPS connection to the provider remains encrypted through the worker and proxy; they do not terminate that inner secure connection. The proxy operator sees the worker's connection address.",
+        "The relay itself can read your request, the provider's response, and any API key in the request because it establishes the secure connection to the provider on your behalf. The application does not persist or log those contents or your proxy credentials. It forwards them for the request and keeps separate operational state, described below. The relay address is a setting, so you can use a relay you operate yourself.",
+        "With no proxy configured, your provider requests go directly from your browser to the provider you picked. Requests for shared starter prompts and catalog listings may still contact our server.",
+      ],
+    },
+    {
+      title: "Public proxy catalog and shared operational state",
+      paragraphs: [
+        "The server maintains a public proxy catalog on a background schedule, hourly by default. It stores public proxy addresses, source references, and check results in Redis and in a catalog snapshot on disk. These are public proxy records, not your browsing history. Opening the catalog, searching, choosing a proxy, or reading saved catalog entries only reads existing results and does not trigger a scan. Background discovery and checks use the fixed catalog relay independently of your own proxy settings.",
+        "Shared Redis state also includes generated starter prompts, background-job coordination, and expiring rate-limit counters. Counter keys use a keyed hash (HMAC) of the client address instead of storing the raw visitor IP address in Redis. This is pseudonymous operational data, not a guarantee of anonymity. The application does not put provider API keys, user proxy passwords, conversations, or relayed request and response contents into this shared state or its catalog snapshots.",
+        "If shared state is unavailable, new proxied requests can fail temporarily while already established streams continue. Public proxies are operated by third parties, and a successful catalog check does not guarantee later availability, confidentiality, or anonymity. The relay and the destination provider still process information as described above.",
       ],
     },
     {

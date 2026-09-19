@@ -61,6 +61,8 @@ export class TunnelError extends Error {
 }
 
 export interface TunnelOptions {
+  purpose?: "catalog";
+  signal?: AbortSignal;
   workerUrl: string;
   secret: string;
   proxy: RelayProxy;
@@ -109,6 +111,11 @@ const DEFAULT_OPEN_TIMEOUT_MS = 35_000;
  * credentials" survives all the way to the user's Settings panel.
  */
 export async function openTunnel(options: TunnelOptions): Promise<Duplex> {
+  const started = Date.now();
+  const throwIfCancelled = () => {
+    if (options.signal?.aborted) throw new TunnelError("Tunnel cancelled.", undefined, "tunnel_cancelled");
+  };
+  throwIfCancelled();
   const {
     workerUrl,
     secret,
@@ -121,7 +128,9 @@ export async function openTunnel(options: TunnelOptions): Promise<Duplex> {
   } = options;
 
   const key = await deriveDialKey(secret);
+  throwIfCancelled();
   const dial: DialRequest = {
+    ...(options.purpose ? { purpose: options.purpose } : {}),
     ts: Date.now(),
     nonce: newNonce(),
     protocol: proxy.protocol,
@@ -133,6 +142,10 @@ export async function openTunnel(options: TunnelOptions): Promise<Duplex> {
     bucket: clientKey ? await deriveBucket(secret, clientKey) : undefined,
   };
   const frame = await sealDial(key, dial);
+  throwIfCancelled();
+  if (Date.now() - started >= openTimeoutMs) {
+    throw new TunnelError("The relay did not respond in time.", undefined, TUNNEL_ERROR_CODES.OPEN_TIMEOUT);
+  }
 
   const ws = new WebSocket(workerUrl, {
     // The Worker sets no_web_socket_compression, and every byte here is either
@@ -158,21 +171,13 @@ export async function openTunnel(options: TunnelOptions): Promise<Duplex> {
 
   return new Promise<Duplex>((resolve, reject) => {
     let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      try {
-        ws.close();
-      } catch {
-        /* not open yet */
-      }
-      logTunnelFail(debugLog, requestId, "timeout");
-      reject(new TunnelError("The relay did not respond in time.", undefined, TUNNEL_ERROR_CODES.OPEN_TIMEOUT));
-    }, openTimeoutMs);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cancel = () => { if (!settled) finish(new TunnelError("Tunnel cancelled.", undefined, "tunnel_cancelled")); };
 
     const finish = (err: Error | null, duplex?: Duplex, branch?: string) => {
       if (settled) return;
       settled = true;
+      options.signal?.removeEventListener("abort", cancel);
       clearTimeout(timer);
       if (err) {
         if (err instanceof TunnelError && branch) logTunnelFail(debugLog, requestId, branch, err.code);
@@ -182,7 +187,7 @@ export async function openTunnel(options: TunnelOptions): Promise<Duplex> {
         // holding a reference, so a relay hitting a run of failures would
         // accumulate one leaked socket per attempt.
         try {
-          ws.close();
+          ws.terminate();
         } catch {
           /* never opened, or already closing */
         }
@@ -193,6 +198,7 @@ export async function openTunnel(options: TunnelOptions): Promise<Duplex> {
     };
 
     ws.on("open", () => {
+      if (settled) return;
       ws.send(frame, { binary: true });
     });
 
@@ -207,13 +213,17 @@ export async function openTunnel(options: TunnelOptions): Promise<Duplex> {
     ws.on("close", (code: number) => {
       // A close before READY is the Worker refusing the dial. After READY the
       // duplex owns the socket and handles close itself.
-      finish(new TunnelError(relayCloseMessage(code), code), undefined, "ws_close_pre_ready");
+      finish(code >= 4000
+        ? new TunnelError(relayCloseMessage(code), code)
+        : new TunnelError("The relay connection failed.", undefined, TUNNEL_ERROR_CODES.CONNECTION_FAILED),
+      undefined, "ws_close_pre_ready");
     });
 
     // The first message is the control frame; everything after it is tunnel
     // data, handled by the duplex below.
     const onControl = (data: WebSocket.RawData) => {
       ws.off("message", onControl);
+      if (settled) return;
       let frameBytes: Uint8Array;
       try {
         frameBytes = toBuffer(data);
@@ -246,6 +256,13 @@ export async function openTunnel(options: TunnelOptions): Promise<Duplex> {
     };
 
     ws.on("message", onControl);
+    timer = setTimeout(() => {
+      finish(new TunnelError("The relay did not respond in time.", undefined, TUNNEL_ERROR_CODES.OPEN_TIMEOUT), undefined, "timeout");
+    }, Math.max(1, openTimeoutMs - (Date.now() - started)));
+    // Register only after every callback and the timer exist. Recheck because
+    // the signal may have fired during key derivation or listener setup.
+    options.signal?.addEventListener("abort", cancel, { once: true });
+    if (options.signal?.aborted) cancel();
   });
 }
 

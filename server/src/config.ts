@@ -19,6 +19,8 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 export interface RelayConfig {
+  redis: { url: string; password?: string; keyPrefix: string; commandTimeoutMs: number };
+  freeProxyCatalog: { intervalMinutes: number; stateDir: string; maxCandidates: number; concurrency: number; startsPerSecond: number; enabled: boolean };
   port: number;
   /** `wss://...` address of the Cloudflare Worker that dials proxies. */
   workerUrl: string;
@@ -84,6 +86,8 @@ export interface RelayConfig {
 const ROOT = process.cwd();
 
 interface ServerSection {
+  redis?: Partial<RelayConfig["redis"]>;
+  freeProxyCatalog?: Partial<RelayConfig["freeProxyCatalog"]>;
   port?: number;
   devPort?: number;
   workerUrl?: string;
@@ -179,8 +183,27 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
     : null;
 
   const distDir = env.DIST_DIR || file.distDir || "";
+  const positive = (value: unknown, fallback: number, name: string): number => {
+    const n = value === undefined ? fallback : Number(value);
+    if (!Number.isSafeInteger(n) || n <= 0) throw new Error(`${name} must be a positive integer`);
+    return n;
+  };
 
   return {
+    redis: {
+      url: env.REDIS_URL || file.redis?.url || "redis://127.0.0.1:6380",
+      password: env.REDIS_PASSWORD,
+      keyPrefix: env.REDIS_KEY_PREFIX || file.redis?.keyPrefix || "inbrowser:v1:",
+      commandTimeoutMs: positive(env.REDIS_COMMAND_TIMEOUT_MS ?? file.redis?.commandTimeoutMs, 1000, "Redis command timeout"),
+    },
+    freeProxyCatalog: {
+      intervalMinutes: positive(env.FREE_PROXY_INTERVAL_MINUTES ?? file.freeProxyCatalog?.intervalMinutes, 60, "Proxy catalog interval"),
+      stateDir: resolve(env.FREE_PROXY_STATE_DIR || file.freeProxyCatalog?.stateDir || "server/state/catalog"),
+      maxCandidates: positive(env.FREE_PROXY_MAX_CANDIDATES ?? file.freeProxyCatalog?.maxCandidates, 100_000, "Proxy candidate limit"),
+      concurrency: positive(env.FREE_PROXY_CONCURRENCY ?? file.freeProxyCatalog?.concurrency, 256, "Proxy check concurrency"),
+      startsPerSecond: positive(env.FREE_PROXY_STARTS_PER_SECOND ?? file.freeProxyCatalog?.startsPerSecond, 20, "Proxy check rate"),
+      enabled: env.FREE_PROXY_CATALOG_DISABLED !== "1" && file.freeProxyCatalog?.enabled !== false,
+    },
     port: intFrom(env.PORT, filePort ?? (dev ? 5173 : 4173)),
     workerUrl: env.WORKER_URL || file.workerUrl || "",
     relaySecret: env.RELAY_SECRET || file.relaySecret || "",

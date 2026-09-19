@@ -102,6 +102,17 @@ export interface CustomProxy {
   source?: string;
   /** Egress IP observed by the last successful Test. Display only. */
   exitIp?: string;
+  /** Catalog observations seed routing until this browser records real outcomes. */
+  catalog?: {
+    id: string;
+    score: number;
+    latencyMs: number;
+    successes: number;
+    checks: number;
+    lastCheckedAt: number;
+    lastSuccessAt: number;
+    country?: string;
+  };
   /** Individual opt-in, off by default. The separate saved global preference
    *  can allow all proxies without rewriting this field. When true, this
    *  proxy's TLS session to the real provider is

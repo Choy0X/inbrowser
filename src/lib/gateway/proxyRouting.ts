@@ -53,17 +53,21 @@ const WEIGHTS = { health: 0.7, latencyInv: 0.3 };
 /** Neutral fallback for a proxy with no recorded successes yet. */
 const DEFAULT_LATENCY_MS = 2000;
 
-function avgLatencyOf(proxyId: string): number {
-  const s = getStats(proxyStore, proxyId);
-  return s.successes > 0 ? recentLatency(proxyStore, proxyId) : DEFAULT_LATENCY_MS;
+/** Catalog data is a short-lived prior. Real session outcomes take precedence. */
+function catalogPrior(proxy: CustomProxy, now: number): { health: number; latency: number } {
+  const c = proxy.catalog;
+  if (!c || !Number.isFinite(c.lastSuccessAt) || c.lastSuccessAt <= 0 ||
+      !Number.isFinite(c.latencyMs) || c.latencyMs < 0 || !Number.isFinite(c.checks) || c.checks <= 0 ||
+      !Number.isFinite(c.successes) || c.successes < 0) return { health: 0.7, latency: DEFAULT_LATENCY_MS };
+  const freshness = Math.exp(-Math.max(0, now - c.lastSuccessAt) / (30 * 60 * 1000));
+  const confidence = Math.min(0.8, c.checks / (c.checks + 3)) * freshness;
+  return {
+    health: 0.7 + confidence * (clamp01(c.successes / c.checks) - 0.7),
+    latency: DEFAULT_LATENCY_MS + confidence * (c.latencyMs - DEFAULT_LATENCY_MS),
+  };
 }
 
-/**
- * Pick among eligible routes, respecting global and destination cooldowns.
- * Auto balances recent health, latency and active requests. Manual restricts
- * selection to checked IDs (which act as their enable signal); order/manual
- * preserve array order. No mode retries a route during its cooldown.
- */
+/** One pass with stable tie-breaking; manual/order preserve pool order. */
 export function pickProxy(
   pool: CustomProxy[],
   excluded: Set<string>,
@@ -71,38 +75,31 @@ export function pickProxy(
   manualProxyIds?: string[],
   targetUrl?: string
 ): CustomProxy | null {
-  let enabled: CustomProxy[];
-  if (mode === "manual") {
-    const allowed = new Set(manualProxyIds ?? []);
-    enabled = pool.filter((p) => allowed.has(p.id) && !excluded.has(p.id));
-  } else {
-    enabled = pool.filter((p) => p.enabled && !excluded.has(p.id));
-  }
-  if (enabled.length === 0) return null;
-
-  const candidates = enabled.filter((p) => !isCoolingDown(proxyStore, p.id) &&
-    (!targetUrl || !isCoolingDown(destinationStore, destinationKey(p.id, targetUrl))));
-  if (!candidates.length) return null;
-
-  if (mode === "order" || mode === "manual") {
-    return candidates[0];
-  }
-
-  let best: { proxy: CustomProxy; score: number } | null = null;
-  for (const p of candidates) {
-    const key = targetUrl ? destinationKey(p.id, targetUrl) : undefined;
-    const routeSamples = key ? getStats(destinationStore, key).recentOutcomes.length : 0;
-    const routeWeight = Math.min(0.7, routeSamples / 5);
-    const health = (1 - routeWeight) * healthFactor(proxyStore, p.id) +
+  const allowed = mode === "manual" ? new Set(manualProxyIds ?? []) : undefined;
+  let origin: string | undefined;
+  if (targetUrl) { try { origin = new URL(targetUrl).origin; } catch { origin = targetUrl; } }
+  const now = Date.now();
+  let best: CustomProxy | null = null;
+  let bestScore = -Infinity;
+  for (const proxy of pool) {
+    if (excluded.has(proxy.id) || (allowed ? !allowed.has(proxy.id) : !proxy.enabled)) continue;
+    const key = origin ? proxy.id + "|" + origin : undefined;
+    if (isCoolingDown(proxyStore, proxy.id, now) || (key && isCoolingDown(destinationStore, key, now))) continue;
+    if (mode !== "auto") return proxy;
+    const stats = getStats(proxyStore, proxy.id);
+    const routeStats = key ? getStats(destinationStore, key) : undefined;
+    const routeWeight = Math.min(0.7, (routeStats?.recentOutcomes.length ?? 0) / 5);
+    const prior = stats.recentOutcomes.length ? undefined : catalogPrior(proxy, now);
+    const health = (1 - routeWeight) * (prior?.health ?? healthFactor(proxyStore, proxy.id)) +
       routeWeight * (key ? healthFactor(destinationStore, key) : 0.7);
-    const latency = key && getStats(destinationStore, key).successes ? recentLatency(destinationStore, key) : avgLatencyOf(p.id);
-    const score =
-      WEIGHTS.health * clamp01(health) +
+    const latency = key && routeStats?.successes ? recentLatency(destinationStore, key) :
+      stats.successes > 0 ? recentLatency(proxyStore, proxy.id) : prior?.latency ?? DEFAULT_LATENCY_MS;
+    const score = WEIGHTS.health * clamp01(health) +
       WEIGHTS.latencyInv * (DEFAULT_LATENCY_MS / (DEFAULT_LATENCY_MS + latency)) -
-      Math.min(0.3, (proxyLoad.get(p.id) ?? 0) * 0.08);
-    if (!best || score > best.score) best = { proxy: p, score };
+      Math.min(0.3, (proxyLoad.get(proxy.id) ?? 0) * 0.08);
+    if (score > bestScore) { best = proxy; bestScore = score; }
   }
-  return best!.proxy;
+  return best;
 }
 
 /** Call after every attempt made through a proxy, mirroring autoRoute's recordOutcome. */

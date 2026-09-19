@@ -1,3 +1,4 @@
+import { SharedRedis, RedisLease } from './redis.ts';
 /**
  * The daily suggestion pool behind `GET /v1/suggestions`.
  *
@@ -205,11 +206,11 @@ const KEYLESS_GENERATORS: Generator[] = [
 ];
 
 /** First model the provider lists, or null. Keyless, like everything else here. */
-async function discoverModel(baseUrl: string): Promise<string | null> {
+async function discoverModel(baseUrl: string, signal: AbortSignal): Promise<string | null> {
   try {
     const res = await fetch(`${baseUrl}/models`, {
       headers: { accept: "application/json" },
-      signal: AbortSignal.timeout(DISCOVER_TIMEOUT_MS),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(DISCOVER_TIMEOUT_MS)]),
     });
     if (!res.ok) return null;
     const body = (await res.json()) as { data?: { id?: unknown }[] };
@@ -258,7 +259,7 @@ export interface Store {
  * is answerable from the first millisecond of the process, before any network
  * call has been attempted, and there is no error path to handle in the handler.
  */
-let store: Store = {
+const curatedStore: Store = {
   dateKey: null,
   generatedAt: Date.now(),
   source: "curated",
@@ -384,13 +385,14 @@ export function validate(raw: string, generatedAt: number): Suggestion[] | null 
  * parameter, nothing read from process.env. That is the point, and verify:relay
  * greps this file to keep it true.
  */
-async function generate(): Promise<Suggestion[] | null> {
+async function generate(signal: AbortSignal): Promise<Suggestion[] | null> {
   const generatedAt = Date.now();
 
   for (const generator of KEYLESS_GENERATORS) {
+    if (signal.aborted) return null;
     const started = Date.now();
     try {
-      const model = generator.model ?? (await discoverModel(generator.baseUrl));
+      const model = generator.model ?? (await discoverModel(generator.baseUrl, signal));
       if (!model) {
         note(generator.label, "no_model", started);
         continue;
@@ -410,7 +412,7 @@ async function generate(): Promise<Suggestion[] | null> {
           max_tokens: 4096,
           temperature: 1,
         }),
-        signal: AbortSignal.timeout(GENERATE_TIMEOUT_MS),
+        signal: AbortSignal.any([signal, AbortSignal.timeout(GENERATE_TIMEOUT_MS)]),
       });
       if (!response.ok) {
         note(generator.label, `http_${response.status}`, started);
@@ -462,89 +464,27 @@ function note(provider: string, outcome: string, startedAt: number): void {
   console.log(JSON.stringify({ evt: "suggestions_attempt", provider, outcome, durationMs: Date.now() - startedAt }));
 }
 
-let refreshing = false;
-
-/**
- * Replaces the pool, or leaves it exactly as it was.
- *
- * A failed refresh deliberately does not fall back to CURATED: yesterday's
- * generated pool is better than the default one, so the store is only ever
- * written on success.
- */
-export async function refresh(): Promise<void> {
-  if (refreshing) return;
-  refreshing = true;
+/** Scheduled generation is shared through Redis and never invoked by a route. */
+export async function refresh(redis: SharedRedis): Promise<void> {
+  const lease = await RedisLease.acquire(redis, 'suggestions');
+  if (!lease) return;
   try {
-    const generated = await generate();
-    const generatedAt = Date.now();
-    if (generated) {
-      store = { dateKey: utcDateKey(), generatedAt, source: "generated", pool: shuffled([...generated, ...CURATED]) };
-      return;
-    }
-    // Nothing generated. Still stamp the date so the hourly tick does not
-    // retry every hour all day against providers that are evidently down, and
-    // still reshuffle so the day's cards differ from yesterday's.
-    store = { dateKey: utcDateKey(), generatedAt, source: "curated", pool: shuffled(CURATED) };
-  } catch {
-    // Unreachable in practice - generate() swallows its own failures - but a
-    // throw escaping into setInterval would take the process down.
-  } finally {
-    refreshing = false;
-  }
+    const previous = await redis.json<Store>('suggestions:pool');
+    if (previous?.dateKey === utcDateKey()) return;
+    const generated = await generate(lease.signal);
+    if (lease.signal.aborted) return;
+    const pool: Store = generated
+      ? { dateKey: utcDateKey(), generatedAt: Date.now(), source: 'generated', pool: shuffled([...generated, ...CURATED]) }
+      : { ...curatedStore, dateKey: utcDateKey(), generatedAt: Date.now(), pool: shuffled(CURATED) };
+    await lease.setJson('suggestions:pool', pool, 172800);
+  } finally { await lease.release(); }
 }
 
-/**
- * The pool, for handing between processes.
- *
- * Under cluster the daily generation happens once, in the primary, and the
- * result is broadcast - so `/v1/suggestions` answers identically whichever
- * worker takes the request. Letting each worker run its own scheduler would
- * mean N generations a day against the keyless providers AND N pools that
- * disagree, which is the part a user would actually notice.
- */
-export function getPoolSnapshot(): Store {
-  return store;
-}
-
-/**
- * Installs a pool received from the primary.
- *
- * Ignores a snapshot with an empty pool rather than trusting it blindly: an
- * empty pool would make the empty state render no cards at all, and the
- * seeded CURATED store this replaces is always a better answer than nothing.
- */
-export function setPoolSnapshot(next: Store): void {
-  if (!next || !Array.isArray(next.pool) || next.pool.length === 0) return;
-  store = next;
-}
-
-/**
- * Starts the daily refresh. Returns a stop function.
- *
- * An hourly tick that compares dates, rather than a setTimeout computed to fire
- * at midnight: it is self-healing. A missed tick, a suspended VM, a container
- * paused for an hour or a clock that jumps all resolve themselves on the next
- * tick instead of leaving the pool frozen until the next restart.
- *
- * SUGGESTIONS_DISABLED=1 makes this a no-op. verify:relay builds the app and is
- * a no-network suite; without this the boot refresh would reach the internet
- * from inside it.
- */
-export function startSuggestionScheduler(
-  env: NodeJS.ProcessEnv = process.env,
-  onRefresh?: (snapshot: Store) => void
-): () => void {
-  if (env.SUGGESTIONS_DISABLED === "1") return () => {};
-
-  const announce = () => onRefresh?.(store);
-  void refresh().then(announce);
-
-  const timer = setInterval(() => {
-    if (utcDateKey() !== store.dateKey) void refresh().then(announce);
-  }, TICK_MS);
-  // Never hold the process open. Same reason as the rate limiter's sweep.
-  timer.unref();
-
+export function startSuggestionScheduler(redis: SharedRedis, env: NodeJS.ProcessEnv = process.env): () => void {
+  if (env.SUGGESTIONS_DISABLED === '1') return () => {};
+  const tick = () => { void refresh(redis).catch(() => {}); };
+  tick();
+  const timer = setInterval(tick, TICK_MS); timer.unref();
   return () => clearInterval(timer);
 }
 
@@ -569,9 +509,10 @@ export interface SelectResult {
  * text-only model is never offered an image prompt it would fail, and the
  * caller's local time of day, which only the browser knows.
  */
-export function selectSuggestions({ part, caps }: SelectOptions): SelectResult {
+export async function selectSuggestions({ part, caps }: SelectOptions, redis: SharedRedis): Promise<SelectResult> {
   const granted = new Set(caps);
-  const current = store;
+  const stored = await redis.json<Store>('suggestions:pool').catch(() => null);
+  const current = stored && Array.isArray(stored.pool) && stored.pool.length ? stored : curatedStore;
 
   const capable = current.pool.filter((s) => s.needs.every((need) => granted.has(need)));
   // Time of day narrows an already-capable set. If that leaves too few - a

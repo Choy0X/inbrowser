@@ -1,414 +1,192 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Check, Download, Loader2, Pause, Plus, X } from "lucide-react";
-import { Dialog } from "./Dialog";
-import { Tooltip } from "./Tooltip";
-import { Button } from "./ui";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { RefreshCw, Sparkles } from "lucide-react";
 import type { CustomProxy } from "../lib/types";
-import { FREE_PROXY_SOURCES } from "../lib/gateway/freeProxySources";
-import { mergeProxyLists, parseProxyList, proxyKey } from "../lib/gateway/freeProxyList";
-import {
-  checkFreeProxyCandidates,
-  buildFreeProxyExportPayload,
-  type FreeProxyCheckResult,
-} from "../lib/gateway/freeProxyScan";
+import { PROXY_PROTOCOLS } from "../lib/types";
+import { proxyKey } from "../lib/gateway/freeProxyList";
+import { CatalogRequestError, catalogProxyToCustom, getCatalogPage, recommendCatalogProxies, resolveCatalogProxies,
+  type CatalogPage, type CatalogProxy, type CatalogSort } from "../lib/gateway/freeProxyCatalog";
+import { Dialog } from "./Dialog";
+import { Button, Input, Select } from "./ui";
 
-const CONCURRENCY = 8;
-
-/**
- * How many working proxies to find before pausing.
- *
- * Public lists carry thousands of entries and the overwhelming majority are
- * dead. At roughly 12s per check with 8 in flight, working through a few hundred
- * is many minutes, and nobody waits for that - so the scan stops once it has
- * found enough to be useful and offers to carry on.
- */
-const STOP_AFTER_ALIVE = 20;
-
-type Phase = "loading" | "scanning" | "paused" | "done";
-
-interface FreeProxyFinderModalProps {
+export function FreeProxyFinderModal({ open, onClose, draftProxies, onAddProxies }: {
   open: boolean;
   onClose: () => void;
-  /** Used to grey out Add for a proxy already in the pool. */
   draftProxies: CustomProxy[];
-  onAddProxy: (proxy: CustomProxy) => void;
-  /** Unsaved relay override, so the finder tests against the same relay Settings shows. */
-  relayUrl?: string;
-  allowInsecureProxyTls?: boolean;
-}
+  onAddProxies: (proxies: CustomProxy[]) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [q, setQ] = useState("");
+  const [protocol, setProtocol] = useState("");
+  const [country, setCountry] = useState("");
+  const [sort, setSort] = useState<CatalogSort>("score");
+  const [cursor, setCursor] = useState<string>();
+  const [history, setHistory] = useState<(string | undefined)[]>([]);
+  const [page, setPage] = useState<CatalogPage | null>(null);
+  const [selected, setSelected] = useState<Map<string, CatalogProxy>>(new Map());
+  const [count, setCount] = useState(10);
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const [refresh, setRefresh] = useState(0);
+  const action = useRef<AbortController>();
+  const existing = useMemo(() => new Set(draftProxies.map(proxyKey)), [draftProxies]);
+  const filters = useMemo(() => ({ q, protocol, country }), [q, protocol, country]);
+  const availableSelection = [...selected.values()].filter(proxy => !existing.has(proxyKey(proxy)));
 
-export function FreeProxyFinderModal({
-  open,
-  onClose,
-  draftProxies,
-  onAddProxy,
-  relayUrl,
-  allowInsecureProxyTls,
-}: FreeProxyFinderModalProps) {
-  const [phase, setPhase] = useState<Phase>("loading");
-  const [candidates, setCandidates] = useState<CustomProxy[]>([]);
-  const [results, setResults] = useState<FreeProxyCheckResult[]>([]);
-  const [addedKeys, setAddedKeys] = useState<Set<string>>(new Set());
-  const [sourceErrors, setSourceErrors] = useState<string[]>([]);
-  const [inFlight, setInFlight] = useState(0);
-  const controllerRef = useRef<AbortController | null>(null);
-
-  const existingKeys = useMemo(() => new Set(draftProxies.map(proxyKey)), [draftProxies]);
-
-  /** Scans a slice of the candidate pool, streaming results in as they settle. */
-  const runScan = useCallback(
-    async (pool: CustomProxy[], startIndex: number) => {
-      const controller = new AbortController();
-      controllerRef.current?.abort();
-      controllerRef.current = controller;
-
-      const slice = pool.slice(startIndex);
-      if (slice.length === 0) {
-        setPhase("done");
-        return;
-      }
-
-      setPhase("scanning");
-      setInFlight(slice.length);
-      let settled = 0;
-      let alive = 0;
-
-      for await (const result of checkFreeProxyCandidates(slice, controller.signal, {
-        concurrency: CONCURRENCY,
-        stopAfterAlive: STOP_AFTER_ALIVE,
-        relayUrl,
-        allowInsecureProxyTls,
-      })) {
-        if (controller.signal.aborted) return;
-        settled++;
-        if (result.status === "alive") alive++;
-        setResults((r) => [...r, result]);
-      }
-
-      if (controller.signal.aborted) return;
-      setInFlight(0);
-      // Distinguishing these matters: "done" means the pool is exhausted and
-      // there is nothing left to offer, "paused" means we stopped early and
-      // there is more to try.
-      setPhase(startIndex + settled >= pool.length ? "done" : alive > 0 ? "paused" : "done");
-    },
-    [relayUrl, allowInsecureProxyTls]
-  );
-
+  useEffect(() => {
+    const timer = setTimeout(() => { setQ(query); setCursor(undefined); setHistory([]); }, 250);
+    return () => clearTimeout(timer);
+  }, [query]);
+  useEffect(() => {
+    if (!open) { action.current?.abort(); setBusy(false); setCursor(undefined); setHistory([]); return; }
+    setSelected(new Map()); setMessage(""); setCursor(undefined); setHistory([]);
+    return () => action.current?.abort();
+  }, [open]);
   useEffect(() => {
     if (!open) return;
     const controller = new AbortController();
-    setPhase("loading");
-    setResults([]);
-    setAddedKeys(new Set());
-    setSourceErrors([]);
-    setCandidates([]);
-
-    void (async () => {
-      const lists: CustomProxy[][] = [];
-      const errors: string[] = [];
-
-      // Sources are fetched straight from the browser: jsDelivr sends ACAO *,
-      // so no relay is involved in getting the lists - only in testing them.
-      await Promise.all(
-        FREE_PROXY_SOURCES.map(async (source) => {
-          try {
-            const res = await fetch(source.url, { signal: controller.signal });
-            if (!res.ok) {
-              errors.push(`${source.label}: HTTP ${res.status}`);
-              return;
-            }
-            lists.push(parseProxyList(await res.text(), source.protocol, source.label));
-          } catch (err) {
-            if (controller.signal.aborted) return;
-            errors.push(`${source.label}: ${err instanceof Error ? err.message : "failed"}`);
-          }
-        })
-      );
-
+    setLoading(true); setError(""); setPage(null);
+    getCatalogPage(filters, sort, cursor, controller.signal).then(result => {
+      if (!controller.signal.aborted) setPage(result);
+    }).catch(err => {
       if (controller.signal.aborted) return;
-      const pool = mergeProxyLists(lists, draftProxies);
-      setCandidates(pool);
-      setSourceErrors(errors);
-      if (pool.length === 0) {
-        setPhase("done");
-        return;
-      }
-      void runScan(pool, 0);
-    })();
+      if (cursor && err instanceof CatalogRequestError && err.status === 400) {
+        setCursor(undefined); setHistory([]);
+        setMessage("This page expired. Showing the first page again.");
+      } else setError(err instanceof Error ? err.message : "Could not load the catalog.");
+    }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [open, filters, sort, cursor, refresh]);
+  // A result requested under older filters must not change the new selection.
+  useEffect(() => { action.current?.abort(); setBusy(false); }, [filters, sort]);
 
-    return () => {
-      controller.abort();
-      controllerRef.current?.abort();
-    };
-    // draftProxies is read once to seed the dedupe set; re-running on every
-    // keystroke in the pool behind the modal would restart the scan.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, runScan]);
-
-  const counts = useMemo(
-    () => ({
-      alive: results.filter((r) => r.status === "alive").length,
-      dead: results.filter((r) => r.status === "dead").length,
-    }),
-    [results]
-  );
-
-  const aliveRows = useMemo(() => results.filter((r) => r.status === "alive"), [results]);
-
-  /** Failed strict TLS verification against the provider - likely MITMing, not just dead. */
-  const tlsUnverifiedRows = useMemo(
-    () => results.filter((r) => r.status === "dead" && r.code === "provider_tls_unverified"),
-    [results]
-  );
-
-  const handleAdd = (proxy: CustomProxy) => {
-    onAddProxy(proxy);
-    setAddedKeys((s) => new Set(s).add(proxyKey(proxy)));
+  const resetPage = () => { setCursor(undefined); setHistory([]); };
+  const toggle = (proxy: CatalogProxy) => setSelected(previous => {
+    const next = new Map(previous);
+    if (next.has(proxy.id)) next.delete(proxy.id);
+    else if (next.size < 100) next.set(proxy.id, proxy);
+    return next;
+  });
+  const smartSelect = async () => {
+    action.current?.abort();
+    const controller = new AbortController(); action.current = controller;
+    setBusy(true); setError(""); setMessage("");
+    try {
+      const excludeIds = draftProxies.flatMap(proxy => proxy.catalog ? [proxy.catalog.id] : []);
+      const result = await recommendCatalogProxies(filters, count, excludeIds, controller.signal);
+      if (controller.signal.aborted) return;
+      const choices = result.items.filter(proxy => !existing.has(proxyKey(proxy)));
+      setSelected(new Map(choices.map(proxy => [proxy.id, proxy])));
+      setMessage(`${choices.length} proxies selected. Review them before adding.`);
+    } catch (err) {
+      if (!controller.signal.aborted) setError(err instanceof Error ? err.message : "Could not select proxies.");
+    } finally { if (!controller.signal.aborted) setBusy(false); }
   };
-
-  /** Adds a TLS-unverified candidate only with the explicit opt-in set - never silently. */
-  const handleAddUnverified = (proxy: CustomProxy) => {
-    onAddProxy({ ...proxy, allowInsecureTls: true });
-    setAddedKeys((s) => new Set(s).add(proxyKey(proxy)));
+  const addSelected = async () => {
+    action.current?.abort();
+    const controller = new AbortController(); action.current = controller;
+    setBusy(true); setError(""); setMessage("");
+    try {
+      const result = await resolveCatalogProxies(availableSelection.map(proxy => proxy.id), controller.signal);
+      if (controller.signal.aborted) return;
+      const additions = result.items.filter(proxy => !existing.has(proxyKey(proxy))).map(catalogProxyToCustom);
+      onAddProxies(additions); setSelected(new Map());
+      setMessage(`${additions.length} proxies added to your draft. Save Settings to keep them.${result.unavailableIds.length ? ` ${result.unavailableIds.length} selected proxies are no longer available.` : ""}`);
+    } catch (err) {
+      if (!controller.signal.aborted) setError(err instanceof Error ? err.message : "Could not add proxies.");
+    } finally { if (!controller.signal.aborted) setBusy(false); }
   };
+  const checkedAt = (at: number | null) => at ? new Date(at).toLocaleString() : "Not checked yet";
 
-  /**
-   * Pauses in place: the "paused" phase already exists for the auto-stop-after
-   * finding enough case, and its "Resume" action (continue from results.length)
-   * works identically regardless of why the scan stopped, so a manual pause
-   * just reuses it rather than introducing a parallel state.
-   */
-  const handlePause = () => {
-    controllerRef.current?.abort();
-    setInFlight(0);
-    setPhase("paused");
-  };
-
-  /** Unlike pause, abandons the scan entirely rather than leaving it resumable. */
-  const handleCancel = () => {
-    controllerRef.current?.abort();
-    onClose();
-  };
-
-  const runExport = (scope: "all" | "alive" | "dead") => {
-    const payload = buildFreeProxyExportPayload(results, scope);
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `free-proxies-${scope}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  return (
-    <Dialog open={open} onClose={onClose} title="Find free proxies" size="xl" closeOnOverlay>
-      <div>
-        <p className="mb-3 text-xs leading-5 text-fg-faint">
-          Public proxy lists, tested end to end through the relay. Most public proxies are dead or
-          slow at any given moment - this is a way to try a lot of them quickly, not a sign that
-          they are good. A proxy you control will be far more reliable.
-        </p>
-
-        {allowInsecureProxyTls && (
-          <p className="mb-3 text-xs leading-5 text-warning">
-            Unverified connections are allowed for all proxies. Certificate verification is off for these tests.
-          </p>
-        )}
-
-        {sourceErrors.length > 0 && (
-          <p className="mb-3 rounded-xl border border-warning/30 bg-warning/10 p-2 text-[11px] leading-5 text-warning">
-            {sourceErrors.length} of {FREE_PROXY_SOURCES.length} sources did not load:{" "}
-            {sourceErrors.join("; ")}
-          </p>
-        )}
-
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <div className="text-xs text-fg-dim">
-            {phase === "loading" ? (
-              <span className="flex items-center gap-1 text-fg-faint">
-                <Loader2 size={12} className="animate-spin" /> Loading lists...
-              </span>
-            ) : (
-              <>
-                <span className="text-success">{counts.alive} working</span>{" "}
-                <span className="text-fg-faint">
-                  · {counts.dead} dead · {candidates.length} found
+  return <Dialog open={open} onClose={onClose} title="Free available proxies" size="xl" footer={
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <span className="text-xs text-fg-dim" aria-live="polite">{availableSelection.length} selected (up to 100)</span>
+      <div className="flex flex-wrap gap-2">
+        <Button onClick={() => setSelected(new Map())} disabled={busy || !selected.size}>Clear</Button>
+        <Button onClick={onClose}>Done</Button>
+        <Button variant="primary" disabled={busy || !availableSelection.length} loading={busy} onClick={() => void addSelected()}>Add selected</Button>
+      </div>
+    </div>
+  }>
+    <div className="space-y-4 max-sm:[&_button]:min-h-11">
+      <p className="text-sm text-fg-dim">Browse recently checked proxies. Availability can change. Added proxies stay in your draft until you save Settings.</p>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <label className="col-span-2 text-xs text-fg-dim">Search
+          <Input className="mt-1" value={query} onChange={event => setQuery(event.target.value)} placeholder="IP, host, port, or country" />
+        </label>
+        <label className="text-xs text-fg-dim">Protocol
+          <Select className="mt-1" value={protocol} onChange={event => { setProtocol(event.target.value); resetPage(); }}>
+            <option value="">All protocols</option>{PROXY_PROTOCOLS.map(value => <option key={value} value={value}>{value.toUpperCase()}</option>)}
+          </Select>
+        </label>
+        <label className="text-xs text-fg-dim">Country code
+          <Input className="mt-1" value={country} maxLength={2} placeholder="Any" onChange={event => { setCountry(event.target.value.toUpperCase()); resetPage(); }} />
+        </label>
+        <label className="text-xs text-fg-dim">Sort by
+          <Select className="mt-1" value={sort} onChange={event => { setSort(event.target.value as CatalogSort); resetPage(); }}>
+            <option value="score">Recommended</option><option value="latency">Lowest latency</option><option value="freshness">Recently checked</option>
+          </Select>
+        </label>
+        <label className="text-xs text-fg-dim">Smart selection count
+          <Input className="mt-1" type="number" min={1} max={100} value={count} onChange={event => setCount(Math.max(1, Math.min(100, Number(event.target.value) || 1)))} />
+        </label>
+        <div className="col-span-2 flex flex-wrap items-end gap-2">
+          <Button disabled={busy || loading} onClick={() => void smartSelect()} icon={<Sparkles size={14} />}>Smart selection</Button>
+          <Button disabled={loading} onClick={() => { resetPage(); setRefresh(value => value + 1); }} icon={<RefreshCw size={14} />}>Refresh</Button>
+        </div>
+      </div>
+      <div className="space-y-1 text-xs text-fg-dim" aria-live="polite">
+        {page && <><p>{page.total} available. Last completed check: {checkedAt(page.status.lastCompletedAt)}.</p><p>{page.status.running ? "Catalog update in progress." : `Next update: ${checkedAt(page.status.nextRunAt)}.`}</p>{page.status.lastError && <p className="text-warning">The last update failed. Previously checked results are shown.</p>}</>}
+        {loading && <p role="status">Loading proxies...</p>}
+        {error && <p role="alert" className="text-error">{error}</p>}
+        {message && <p role="status">{message}</p>}
+      </div>
+      {availableSelection.length > 0 && <details className="rounded-lg border border-border-subtle p-3">
+        <summary className="cursor-pointer text-sm">Review {availableSelection.length} selected proxies</summary>
+        <ul className="mt-2 max-h-48 overflow-y-auto divide-y divide-border-subtle">
+          {availableSelection.map(proxy => <li key={proxy.id} className="flex items-center justify-between gap-2 py-2 text-xs">
+            <span className="min-w-0 break-all">{proxy.protocol.toUpperCase()} {proxy.host}:{proxy.port} / {proxy.latencyMs} ms</span>
+            <Button size="sm" disabled={busy} aria-label={`Deselect ${proxy.host}:${proxy.port}`} onClick={() => toggle(proxy)}>Remove</Button>
+          </li>)}
+        </ul>
+      </details>}
+      {!loading && page?.items.length === 0 && <p className="rounded-lg border border-border-subtle p-5 text-sm text-fg-dim">{page.status.lastCompletedAt ? "No proxies match these filters. Try another search or protocol." : "The catalog is being prepared. Refresh after the first check completes."}</p>}
+      {!!page?.items.length && <>
+        <div className="flex items-center justify-between gap-2 text-xs">
+          <span className="text-fg-dim">Page {history.length + 1}</span>
+          <Button size="sm" disabled={busy} onClick={() => setSelected(previous => {
+            const next = new Map(previous);
+            for (const proxy of page.items) if (next.size < 100 && !existing.has(proxyKey(proxy))) next.set(proxy.id, proxy);
+            return next;
+          })}>Select page</Button>
+        </div>
+        <ul className="divide-y divide-border-subtle rounded-lg border border-border-subtle">
+          {page.items.map(proxy => {
+            const added = existing.has(proxyKey(proxy));
+            return <li key={proxy.id}>
+              <label className="flex min-h-11 cursor-pointer items-start gap-3 p-3 hover:bg-bg-hover">
+                <input type="checkbox" className="mt-1 h-4 w-4 shrink-0 accent-accent" checked={added || selected.has(proxy.id)} disabled={added || busy || (selected.size >= 100 && !selected.has(proxy.id))} onChange={() => toggle(proxy)} aria-label={`Select ${proxy.protocol} ${proxy.host}:${proxy.port}`} />
+                <span className="min-w-0 flex-1">
+                  <span className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-sm"><span className="break-all font-mono">{proxy.host}:{proxy.port}</span><span className="text-xs text-fg-dim">{added ? "Already added" : `${proxy.latencyMs} ms`}</span></span>
+                  <span className="mt-1 block text-xs text-fg-dim">{proxy.protocol.toUpperCase()} / {proxy.country || "Unknown country"} / {proxy.checks ? Math.round(proxy.successes / proxy.checks * 100) : 0}% successful</span>
+                  <span className="mt-1 block break-words text-xs text-fg-faint">Checked {checkedAt(proxy.lastCheckedAt)}{proxy.exitIp ? ` / Exit IP ${proxy.exitIp}` : ""}</span>
                 </span>
-                {phase === "scanning" && inFlight > 0 && <> · testing...</>}
-              </>
-            )}
-          </div>
-          <div className="flex items-center gap-1.5">
-            {phase === "scanning" && (
-              <>
-                <button
-                  type="button"
-                  onClick={handlePause}
-                  className="flex items-center gap-1 rounded-lg border border-border bg-canvas px-2 py-1 text-[11px] font-medium hover:bg-bg-hover"
-                >
-                  <Pause size={11} /> Pause
-                </button>
-                <button
-                  type="button"
-                  onClick={handleCancel}
-                  className="flex items-center gap-1 rounded-lg border border-border bg-canvas px-2 py-1 text-[11px] font-medium hover:bg-bg-hover"
-                >
-                  <X size={11} /> Cancel
-                </button>
-              </>
-            )}
-            {(["all", "alive", "dead"] as const).map((scope) => (
-              <button
-                key={scope}
-                type="button"
-                onClick={() => runExport(scope)}
-                disabled={results.length === 0}
-                className="flex items-center gap-1 rounded-lg border border-border bg-canvas px-2 py-1 text-[11px] font-medium hover:bg-bg-hover disabled:opacity-40"
-              >
-                <Download size={11} /> Export {scope}
-              </button>
-            ))}
-          </div>
+              </label>
+              <details className="mr-3 mb-2 ml-10 min-w-0 text-xs text-fg-dim">
+                <summary tabIndex={0} aria-label={`Sources for ${proxy.host}:${proxy.port}`} className="min-h-11 cursor-pointer py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40">Sources ({proxy.sources.length})</summary>
+                {proxy.sources.length ? <ul className="max-h-32 space-y-1 overflow-y-auto overscroll-contain pb-2">
+                  {proxy.sources.map((source, index) => <li key={index} className="break-words [overflow-wrap:anywhere]">{source}</li>)}
+                </ul> : <p className="pb-2">Source information is unavailable.</p>}
+              </details>
+            </li>;
+          })}
+        </ul>
+        <div className="flex justify-between gap-2">
+          <Button disabled={loading || history.length === 0} onClick={() => { setCursor(history[history.length - 1]); setHistory(previous => previous.slice(0, -1)); }}>Previous</Button>
+          <Button disabled={loading || !page.nextCursor} onClick={() => { setHistory(previous => [...previous, cursor]); setCursor(page.nextCursor ?? undefined); }}>Next</Button>
         </div>
-
-        <div className="max-h-[55vh] space-y-1 overflow-y-auto">
-          {aliveRows.map((row) => (
-            <FreeProxyRow
-              key={proxyKey(row.proxy)}
-              result={row}
-              alreadyInPool={existingKeys.has(proxyKey(row.proxy)) || addedKeys.has(proxyKey(row.proxy))}
-              onAdd={handleAdd}
-            />
-          ))}
-
-          {aliveRows.length === 0 && phase !== "loading" && (
-            <p className="rounded-xl border border-dashed border-border-subtle bg-canvas p-4 text-center text-xs text-fg-faint">
-              {phase === "scanning"
-                ? "Testing proxies - working ones appear here as they are found."
-                : "None of the proxies tested so far are working."}
-            </p>
-          )}
-
-          {tlsUnverifiedRows.length > 0 && (
-            <div className="mt-2 space-y-1">
-              <p className="px-1 text-[11px] font-medium uppercase tracking-[0.06em] text-warning">
-                Unverified - likely intercepting traffic
-              </p>
-              {tlsUnverifiedRows.map((row) => (
-                <TlsUnverifiedProxyRow
-                  key={proxyKey(row.proxy)}
-                  result={row}
-                  alreadyInPool={existingKeys.has(proxyKey(row.proxy)) || addedKeys.has(proxyKey(row.proxy))}
-                  onAdd={handleAddUnverified}
-                />
-              ))}
-            </div>
-          )}
-        </div>
-
-        {(phase === "paused" || (phase === "done" && results.length < candidates.length)) && (
-          <div className="mt-3 flex items-center justify-between gap-2 rounded-xl border border-border-subtle bg-canvas p-3">
-            <p className="text-xs text-fg-dim">
-              Stopped after {counts.alive} working {counts.alive === 1 ? "proxy" : "proxies"}.{" "}
-              {candidates.length - results.length} untested.
-            </p>
-            <div className="flex items-center gap-1.5">
-              <Button size="sm" variant="ghost" onClick={handleCancel}>
-                Cancel
-              </Button>
-              <Button size="sm" variant="secondary" onClick={() => void runScan(candidates, results.length)}>
-                Resume
-              </Button>
-            </div>
-          </div>
-        )}
-      </div>
-    </Dialog>
-  );
+      </>}
+    </div>
+  </Dialog>;
 }
-
-const FreeProxyRow = memo(function FreeProxyRow({
-  result,
-  alreadyInPool,
-  onAdd,
-}: {
-  result: FreeProxyCheckResult;
-  alreadyInPool: boolean;
-  onAdd: (proxy: CustomProxy) => void;
-}) {
-  const { proxy } = result;
-  return (
-    <div className="flex items-center gap-2.5 rounded-xl border border-border-subtle bg-canvas px-3 py-2">
-      <div className="min-w-0 flex-1">
-        <div className="truncate font-mono text-xs">
-          {proxy.protocol}://{proxy.host}:{proxy.port}
-        </div>
-        <div className="truncate text-[11px] text-fg-faint">
-          {proxy.source}
-          {proxy.exitIp && <> · exits from {proxy.exitIp}</>}
-        </div>
-      </div>
-      <div className="w-24 shrink-0 text-xs">
-        <Tooltip label={`Round trip through the relay and this proxy`}>
-          <span className="flex items-center gap-1 text-success">
-            <Check size={12} /> {result.result?.latencyMs} ms
-          </span>
-        </Tooltip>
-      </div>
-      <button
-        type="button"
-        onClick={() => onAdd(proxy)}
-        disabled={alreadyInPool}
-        className="flex shrink-0 items-center gap-1 rounded-lg border border-border bg-canvas px-2 py-1 text-[11px] font-medium hover:bg-bg-hover disabled:opacity-40"
-      >
-        {alreadyInPool ? <Check size={11} /> : <Plus size={11} />}
-        {alreadyInPool ? "Added" : "Add"}
-      </button>
-    </div>
-  );
-});
-
-/**
- * A candidate that failed strict TLS verification against the provider - it
- * likely intercepted (MITMed) the connection rather than passing it through,
- * which is why it's shown separately from plain dead proxies with an explicit
- * warning, never auto-added.
- */
-const TlsUnverifiedProxyRow = memo(function TlsUnverifiedProxyRow({
-  result,
-  alreadyInPool,
-  onAdd,
-}: {
-  result: FreeProxyCheckResult;
-  alreadyInPool: boolean;
-  onAdd: (proxy: CustomProxy) => void;
-}) {
-  const { proxy } = result;
-  return (
-    <div className="flex flex-col gap-1.5 rounded-xl border border-warning/30 bg-warning/10 px-3 py-2">
-      <div className="flex items-center gap-2.5">
-        <div className="min-w-0 flex-1">
-          <div className="truncate font-mono text-xs">
-            {proxy.protocol}://{proxy.host}:{proxy.port}
-          </div>
-          <div className="truncate text-[11px] text-fg-faint">{proxy.source}</div>
-        </div>
-        <button
-          type="button"
-          onClick={() => onAdd(proxy)}
-          disabled={alreadyInPool}
-          className="flex shrink-0 items-center gap-1 rounded-lg border border-warning/40 bg-canvas px-2 py-1 text-[11px] font-medium text-warning hover:bg-bg-hover disabled:opacity-40"
-        >
-          {alreadyInPool ? <Check size={11} /> : <Plus size={11} />}
-          {alreadyInPool ? "Added" : "Add anyway (unverified)"}
-        </button>
-      </div>
-      <p className="text-[11px] leading-5 text-warning">
-        Allow this proxy even though its connection to providers can't be verified as secure. If
-        enabled, this proxy's operator could potentially read your API keys and messages.
-      </p>
-    </div>
-  );
-});

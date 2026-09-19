@@ -49,8 +49,6 @@ import type {
 } from "../lib/onniroute";
 import { DEFAULT_OMNIROUTE_URL, discoverModels } from "../lib/onniroute";
 import { dismissLegacyProxyNotice, legacyProxyCount, legacyProxyExport } from "../lib/gatewaySettings";
-import { testRelay, type RelayHealth } from "../lib/gateway/proxy/relay";
-import { APP_RELAY_URL } from "../lib/appConfig";
 import { listModels } from "../lib/gateway/omniroute";
 import type { OmniModel, ProxyProtocol } from "../lib/types";
 import { PROXY_PROTOCOLS, proxySupportsPassword } from "../lib/types";
@@ -63,11 +61,12 @@ import { MAX_MEMORIES, newMemoryItem } from "../lib/preferences";
 import { Toggle } from "./Toggle";
 import { Tooltip } from "./Tooltip";
 import { ModelMultiSelect } from "./ModelMultiSelect";
-import { Dialog, ConfirmDialog } from "./Dialog";
+import { Dialog, ConfirmDialog, useModalFocus } from "./Dialog";
 import { FreeProxyFinderModal } from "./FreeProxyFinderModal";
 import { Button, Input, Select, Textarea, SearchInput } from "./ui";
 import { APP_NAME } from "../lib/appConfig";
 import { ProxyListDialog } from "./ProxyListDialog";
+import { mergeCatalogProxies } from "../lib/gateway/freeProxyCatalog";
 
 export type SettingsTab = "general" | "providers" | "proxies" | "personalization" | "memory";
 
@@ -453,6 +452,8 @@ export function SettingsModal({
   onExportBackup,
   onImportBackup,
 }: SettingsModalProps) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  useModalFocus(panelRef, open, onClose);
   const [tab, setTab] = useState<SettingsTab>(initialTab);
   const [draftTheme, setDraftTheme] = useState<ThemeMode>(theme);
   const [draftMode, setDraftMode] = useState<ConnectionMode>(settings.mode);
@@ -461,10 +462,8 @@ export function SettingsModal({
   const [draftProxies, setDraftProxies] = useState<CustomProxy[]>(settings.proxies);
   const [draftProxyMode, setDraftProxyMode] = useState<ProxyRoutingMode>(settings.proxyRoutingMode);
   const [draftManualProxyIds, setDraftManualProxyIds] = useState<string[]>(settings.manualProxyIds);
-  const [draftRelayUrl, setDraftRelayUrl] = useState<string>(settings.relayUrl);
   const [draftAllowInsecureProxyTls, setDraftAllowInsecureProxyTls] = useState(settings.allowInsecureProxyTls);
   const proxyTestGeneration = useRef(0);
-  const [relayTest, setRelayTest] = useState<TestState<RelayHealth>>({ status: "idle" });
   const [legacyProxies, setLegacyProxies] = useState(0);
   const [draftSearch, setDraftSearch] = useState(settings.search);
   const [testByConnectionId, setTestByConnectionId] = useState<Record<string, TestState<TestResult>>>({});
@@ -503,15 +502,14 @@ export function SettingsModal({
       setDraftProxies(settings.proxies);
       setDraftProxyMode(settings.proxyRoutingMode);
       setDraftManualProxyIds(settings.manualProxyIds);
-      setDraftRelayUrl(settings.relayUrl);
       setDraftAllowInsecureProxyTls(settings.allowInsecureProxyTls);
       proxyTestGeneration.current++;
-      setRelayTest({ status: "idle" });
       setLegacyProxies(legacyProxyCount());
       setDraftSearch(settings.search);
       setTestByConnectionId({});
       setTestByProxyId({});
       setSelectedProxyId(null);
+      setFreeProxyFinderOpen(false);
       setProxyIoMode(null);
       setOmniRouteTest({ status: "idle" });
       setOmniRouteModels({ status: "idle" });
@@ -579,7 +577,8 @@ export function SettingsModal({
   };
 
   const updateProxy = useCallback((id: string, patch: Partial<CustomProxy>) => {
-    setDraftProxies((list) => list.map((p) => (p.id === id ? { ...p, ...patch } : p)));
+    const invalidatesObservation = PROXY_TEST_INVALIDATING_FIELDS.some(field => field in patch);
+    setDraftProxies((list) => list.map((p) => (p.id === id ? { ...p, ...(invalidatesObservation ? { catalog: undefined } : {}), ...patch } : p)));
     // Any field that changes where or how we dial invalidates a previous Test
     // result. A stale green tick next to an edited host is worse than no tick.
     if (PROXY_TEST_INVALIDATING_FIELDS.some((field) => field in patch)) {
@@ -612,7 +611,7 @@ export function SettingsModal({
       proxyTestVersions.current[proxy.id] = version;
       setTestByProxyId((t) => ({ ...t, [proxy.id]: { status: "testing" } }));
       try {
-        const result = await onTestProxy(proxy, draftRelayUrl.trim() || undefined, draftAllowInsecureProxyTls);
+        const result = await onTestProxy(proxy, undefined, draftAllowInsecureProxyTls);
         if (generation !== proxyTestGeneration.current || version !== proxyTestVersions.current[proxy.id]) return;
         setTestByProxyId((t) => ({
           ...t,
@@ -628,7 +627,7 @@ export function SettingsModal({
         }));
       }
     },
-    [onTestProxy, draftRelayUrl, draftAllowInsecureProxyTls]
+    [onTestProxy, draftAllowInsecureProxyTls]
   );
 
   const proxySensors = useSensors(
@@ -660,8 +659,8 @@ export function SettingsModal({
     [updateProxy]
   );
 
-  const handleAddFreeProxy = useCallback((proxy: CustomProxy) => {
-    setDraftProxies((list) => [proxy, ...list]);
+  const handleAddFreeProxies = useCallback((proxies: CustomProxy[]) => {
+    setDraftProxies((list) => mergeCatalogProxies(list, proxies));
   }, []);
 
   /** The archived pre-rework CORS proxies, for the one-time migration notice. */
@@ -828,7 +827,7 @@ export function SettingsModal({
       proxies: draftProxies,
       proxyRoutingMode: draftProxyMode,
       manualProxyIds: draftManualProxyIds,
-      relayUrl: draftRelayUrl.trim(),
+      relayUrl: "",
       allowInsecureProxyTls: draftAllowInsecureProxyTls,
       search: draftSearch,
     });
@@ -908,28 +907,35 @@ export function SettingsModal({
 
   return (
     <>
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto px-4">
-      <div className="fixed inset-0 bg-overlay/60" onClick={onClose} />
-      <div className="relative z-10 mt-10 mb-16 w-full max-w-3xl overflow-hidden rounded-2xl border border-border bg-bg-elevated shadow-lift">
-        <div className="flex items-center justify-between border-b border-border px-5 py-4">
-          <h2 className="text-base font-medium">Settings</h2>
+    <div className="fixed inset-0 z-50 flex items-center justify-center md:p-6">
+      <div className="fixed inset-0 bg-overlay/60" aria-hidden="true" />
+      <div ref={panelRef} role="dialog" aria-modal="true" aria-labelledby="settings-title" tabIndex={-1} className="relative z-10 flex h-dvh w-full min-w-0 flex-col overflow-hidden bg-bg-elevated outline-none max-md:[&_button]:min-h-11 md:h-[min(52rem,calc(100dvh-3rem))] md:max-w-4xl md:rounded-lg md:border md:border-border md:shadow-lift">
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-3 sm:px-5">
+          <h2 id="settings-title" className="text-base font-medium">Settings</h2>
           <button
             type="button"
             onClick={onClose}
-            className="rounded-full border border-border bg-canvas p-1.5 text-fg-dim hover:bg-bg-hover hover:text-fg"
+            aria-label="Close Settings"
+            className="flex min-h-11 min-w-11 items-center justify-center rounded-full border border-border bg-canvas p-1.5 text-fg-dim hover:bg-bg-hover hover:text-fg"
           >
             <X size={18} />
           </button>
         </div>
 
-        <div className="flex" style={{ maxHeight: "58vh" }}>
-          <nav className="w-40 shrink-0 space-y-0.5 overflow-y-auto border-r border-border-subtle p-2">
+        <label className="shrink-0 border-b border-border-subtle px-4 py-2 text-xs text-fg-dim md:hidden">Section
+          <Select className="mt-1 min-h-11" value={tab} onChange={event => setTab(event.target.value as SettingsTab)}>
+            {tabOptions.map(option => <option key={option.value} value={option.value}>{option.label}{option.value === "memory" && draftPrefs.pendingMemories.length ? ` (${draftPrefs.pendingMemories.length} pending)` : ""}</option>)}
+          </Select>
+        </label>
+        <div className="flex min-h-0 flex-1">
+          <nav aria-label="Settings sections" className="hidden w-40 shrink-0 space-y-0.5 overflow-y-auto border-r border-border-subtle p-2 md:block">
             {tabOptions.map((opt) => (
               <button
                 key={opt.value}
                 type="button"
                 onClick={() => setTab(opt.value)}
                 data-ui="nav-item"
+                aria-current={tab === opt.value ? "page" : undefined}
                 data-active={tab === opt.value ? "" : undefined}
                 className={`flex w-full items-center justify-between gap-2 px-2.5 text-sm transition-colors ${
                   tab === opt.value
@@ -943,7 +949,7 @@ export function SettingsModal({
             ))}
           </nav>
 
-          <div className="min-w-0 flex-1 space-y-5 overflow-y-auto px-5 py-5">
+          <div className="min-h-0 min-w-0 flex-1 space-y-5 overflow-y-auto overscroll-contain px-4 py-4 sm:px-5 sm:py-5">
           {tab === "general" && (
             <div>
               <div className="mb-1.5 text-sm font-medium">Appearance</div>
@@ -1396,7 +1402,7 @@ export function SettingsModal({
 
           {tab === "proxies" && (
             <div>
-              <div className="mb-1.5 flex items-center justify-between">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                 <span className="text-sm font-medium">
                   Custom proxy servers
                   {draftProxies.length > 0 && (
@@ -1405,13 +1411,13 @@ export function SettingsModal({
                     </span>
                   )}
                 </span>
-                <div className="flex items-center gap-1.5">
+                <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
                     onClick={() => setFreeProxyFinderOpen(true)}
                     className="flex items-center gap-1 rounded-lg border border-border bg-canvas px-2.5 py-1.5 text-xs font-medium hover:bg-bg-hover"
                   >
-                    <Sparkles size={13} /> Fetch free proxies
+                    <Sparkles size={13} /> Get Free available proxies
                   </button>
                   <Tooltip label="Export your proxies">
                     <button
@@ -1489,59 +1495,11 @@ export function SettingsModal({
                 </div>
               )}
 
-              <div className="mb-4 rounded-xl border border-border bg-canvas p-3">
-                <div className="text-sm font-medium">Relay</div>
-                <p className="mt-1 text-xs leading-5 text-fg-dim">
-                  Real proxies speak TCP, which a browser cannot. Requests through a proxy are sent
-                  via a relay, which tunnels them out through a Cloudflare worker - so the proxy sees
-                  a Cloudflare address rather than any server of ours, and your requests are carried
-                  as bytes the worker cannot read. The relay itself does see them, including API
-                  keys; it keeps no logs and stores nothing. Left blank it is this site's own server,
-                  not a third party. Point it elsewhere only to use a relay you run yourself.
-                </p>
-                <div className="mt-2 flex items-center gap-2">
-                  <Input
-                    value={draftRelayUrl}
-                    onChange={(e) => {
-                      setDraftRelayUrl(e.target.value);
-                      setRelayTest({ status: "idle" });
-                    }}
-                    placeholder={APP_RELAY_URL || "This site (same origin)"}
-                    spellCheck={false}
-                    className="flex-1 font-mono text-xs"
-                  />
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    disabled={relayTest.status === "testing"}
-                    onClick={async () => {
-                      setRelayTest({ status: "testing" });
-                      const health = await testRelay(draftRelayUrl);
-                      setRelayTest(
-                        health.ok
-                          ? { status: "ok", result: health }
-                          : { status: "fail", message: health.error ?? "Unreachable" }
-                      );
-                    }}
-                  >
-                    {relayTest.status === "testing" ? "Testing..." : "Test relay"}
-                  </Button>
-                </div>
-                {relayTest.status === "ok" && (
-                  <p className="mt-2 text-xs text-success">
-                    Relay reachable{relayTest.result.version ? ` · v${relayTest.result.version}` : ""}
-                  </p>
-                )}
-                {relayTest.status === "fail" && (
-                  <p className="mt-2 text-xs text-error">{relayTest.message}</p>
-                )}
-              </div>
-
               <div className="mb-4 flex items-start justify-between gap-3 rounded-xl border border-warning/30 bg-warning/10 p-3">
                 <div>
                   <div className="text-sm font-medium">Allow unverified connections for all proxies</div>
                   <p className="mt-1 text-xs leading-5 text-fg-dim">
-                    Applies to every proxy, including new proxies and free-proxy tests. When off,
+                    Applies to every proxy, including new proxies and individual connection tests. When off,
                     each proxy uses its individual setting.
                   </p>
                   <p className="mt-1 text-xs leading-5 text-warning">
@@ -1847,7 +1805,7 @@ export function SettingsModal({
           </div>
         </div>
 
-        <div className="flex justify-end gap-2 border-t border-border px-5 py-4">
+        <div className="flex shrink-0 justify-end gap-2 border-t border-border px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-5">
           <button
             type="button"
             onClick={onClose}
@@ -1920,7 +1878,7 @@ export function SettingsModal({
             return <>
               <Button size="sm" loading={test.status === "testing"} disabled={!selectedProxy.host || !isValidPort(selectedProxy.port)} onClick={() => void runProxyTest(selectedProxy)} icon={<RefreshCw size={14} />}>Test proxy</Button>
               <p className={`mt-2 break-words text-xs ${test.status === "fail" ? "text-error" : test.status === "ok" ? "text-success" : "text-fg-faint"}`}>
-                {test.status === "ok" ? `Reachable. Exit IP: ${test.result.exitIp ?? "unknown"}. ${test.result.latencyMs} ms.` : test.status === "fail" ? `Failed: ${test.message}` : test.status === "testing" ? "Testing connection..." : "Test this proxy's reachability through your relay."}
+                {test.status === "ok" ? `Reachable. Exit IP: ${test.result.exitIp ?? "unknown"}. ${test.result.latencyMs} ms.` : test.status === "fail" ? `Failed: ${test.message}` : test.status === "testing" ? "Testing connection..." : "Test this proxy's connection."}
               </p>
             </>;
           })()}
@@ -1939,9 +1897,7 @@ export function SettingsModal({
       open={freeProxyFinderOpen}
       onClose={() => setFreeProxyFinderOpen(false)}
       draftProxies={draftProxies}
-      onAddProxy={handleAddFreeProxy}
-      relayUrl={draftRelayUrl.trim() || undefined}
-      allowInsecureProxyTls={draftAllowInsecureProxyTls}
+      onAddProxies={handleAddFreeProxies}
     />
     </>
   );

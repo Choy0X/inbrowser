@@ -55,11 +55,7 @@ export interface GatewaySettings {
   proxyRoutingMode: ProxyRoutingMode;
   /** Proxy ids checked for use when proxyRoutingMode === "manual" (multi-select). */
   manualProxyIds: string[];
-  /**
-   * Override for the proxy relay. Empty means "use the default from
-   * config.json's `client.relayUrl`", so changing that default reaches everyone
-   * who never set their own. See gateway/proxy/relay.ts.
-   */
+  /** Deprecated compatibility field. User overrides are ignored and cleared. */
   relayUrl: string;
   /** User opt-in for unverified provider TLS across all proxies in this browser. */
   allowInsecureProxyTls: boolean;
@@ -96,7 +92,7 @@ export function getSettings(): GatewaySettings {
             ? parsed.proxyRoutingMode
             : "auto",
         manualProxyIds: Array.isArray(parsed.manualProxyIds) ? parsed.manualProxyIds : [],
-        relayUrl: typeof parsed.relayUrl === "string" ? parsed.relayUrl : "",
+        relayUrl: "",
         allowInsecureProxyTls: parsed.allowInsecureProxyTls === true,
         search: migrateSearchSettings(parsed.search) ?? defaults.search,
       };
@@ -122,7 +118,7 @@ function migrateSearchSettings(search: SearchSettings | undefined): SearchSettin
 }
 
 export function saveSettings(settings: GatewaySettings): void {
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...settings, relayUrl: "" }));
 }
 
 // ------------------------------------------------------------ proxy migration

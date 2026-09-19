@@ -1,11 +1,10 @@
 /**
  * InBrowser's server.
  *
- * It does two jobs and nothing else: it serves the built client, and it forwards
+ * It serves the built client, and it forwards
  * a proxied request to the Cloudflare Worker that dials the user's proxy (that
- * Worker is a separate repository, `inbrowser-relay`). There is exactly one API
- * route that matters. Fastify is here to route and serve files - it is not a
- * backend, and nothing else belongs in it.
+ * Worker is a separate repository, `inbrowser-relay`). Scheduled jobs maintain
+ * public proxy and suggestion catalogs in Redis; public routes only read them.
  *
  * Serving the client from the same origin as the relay is the reason this exists
  * at all: it removes CORS, the X-Relay-Meta preflight and the relay URL the
@@ -39,12 +38,10 @@ import { isPlaceholderSecret, loadConfig, type RelayConfig } from "./config.ts";
 import { registerStatic } from "./static.ts";
 import { emptySnapshot, mergeSnapshots, snapshot, type MetricsSnapshot } from "./metrics.ts";
 import { startMetricsServer } from "./metricsServer.ts";
-import {
-  getPoolSnapshot,
-  setPoolSnapshot,
-  startSuggestionScheduler,
-  type Store as SuggestionStore,
-} from "./suggestions.ts";
+import { startSuggestionScheduler } from './suggestions.ts';
+import { SharedRedis } from './redis.ts';
+import { CatalogRepository } from './catalog/repository.ts';
+import { startCatalogScheduler } from './catalog/scheduler.ts';
 
 /** How often a worker reports its counters to the primary. */
 const METRICS_PUSH_MS = 5_000;
@@ -60,10 +57,9 @@ const METRICS_PUSH_MS = 5_000;
 const DRAIN_TIMEOUT_MS = 150_000;
 
 type WorkerMessage =
-  | { type: "metrics"; snapshot: MetricsSnapshot }
-  | { type: "suggestions:req" };
+  | { type: "metrics"; snapshot: MetricsSnapshot };
 
-type PrimaryMessage = { type: "suggestions"; snapshot: SuggestionStore };
+
 
 function resolveWorkerCount(config: RelayConfig): number {
   // Dev is always one process. `npm run dev` is `node --watch`, and dev.ts runs
@@ -87,10 +83,6 @@ async function runPrimary(config: RelayConfig, workerCount: number): Promise<voi
     worker.on("message", (msg: WorkerMessage) => {
       if (msg?.type === "metrics") {
         latest.set(worker.id, msg.snapshot);
-      } else if (msg?.type === "suggestions:req") {
-        // A worker that started after the last refresh. Until this arrives it
-        // serves the curated seed, so the route is answerable throughout.
-        send(worker, { type: "suggestions", snapshot: getPoolSnapshot() });
       }
     });
     worker.on("exit", () => {
@@ -102,25 +94,11 @@ async function runPrimary(config: RelayConfig, workerCount: number): Promise<voi
     return worker;
   };
 
-  const send = (worker: import("node:cluster").Worker, msg: PrimaryMessage) => {
-    try {
-      if (worker.isConnected()) worker.send(msg);
-    } catch {
-      /* exiting - nothing to do about it and nothing to report */
-    }
-  };
-
-  const broadcast = (msg: PrimaryMessage) => {
-    for (const worker of Object.values(cluster.workers ?? {})) {
-      if (worker) send(worker, msg);
-    }
-  };
-
   for (let i = 0; i < workerCount; i++) fork();
 
   // Generation happens here, once, and the result is pushed out. See the
   // comment on getPoolSnapshot for why this cannot live in the workers.
-  startSuggestionScheduler(process.env, (snap) => broadcast({ type: "suggestions", snapshot: snap }));
+  const shared = startSharedJobs(config);
 
   if (config.metricsPort > 0) {
     const server = await startMetricsServer(config.metricsPort, () => {
@@ -189,6 +167,7 @@ async function runPrimary(config: RelayConfig, workerCount: number): Promise<voi
   const shutdown = () => {
     if (draining) return;
     draining = true;
+    shared.stop();
     void (async () => {
       await Promise.all(
         Object.values(cluster.workers ?? {})
@@ -204,9 +183,20 @@ async function runPrimary(config: RelayConfig, workerCount: number): Promise<voi
   console.log(`InBrowser primary: ${workerCount} worker${workerCount === 1 ? "" : "s"} on :${config.port}`);
 }
 
+function startSharedJobs(config: RelayConfig, existing?: SharedRedis) {
+  const redis = existing ?? new SharedRedis(config.redis);
+  redis.start();
+  const stopSuggestions = startSuggestionScheduler(redis);
+  const stopCatalog = startCatalogScheduler(config, new CatalogRepository(redis, config.freeProxyCatalog.intervalMinutes, config.freeProxyCatalog.stateDir, config.freeProxyCatalog.maxCandidates));
+  return { stop() { stopSuggestions(); stopCatalog(); if (!existing) void redis.close(); } };
+}
+
 /** A worker, or the whole server when running unclustered. */
 async function runServer(config: RelayConfig): Promise<void> {
-  const app = buildApp(config);
+  const redis = new SharedRedis(config.redis);
+  redis.start();
+  const app = buildApp(config, redis);
+  app.addHook('onClose', async () => redis.close());
 
   if (config.dev) {
     // Dynamic, and marked --external in the bundle, so the production artifact
@@ -222,18 +212,14 @@ async function runServer(config: RelayConfig): Promise<void> {
   app.server.headersTimeout = 30_000;
 
   if (cluster.isWorker) {
-    process.on("message", (msg: PrimaryMessage) => {
-      if (msg?.type === "suggestions") setPoolSnapshot(msg.snapshot);
-    });
-    process.send?.({ type: "suggestions:req" } satisfies WorkerMessage);
-
     const timer = setInterval(() => {
       process.send?.({ type: "metrics", snapshot: snapshot() } satisfies WorkerMessage);
     }, METRICS_PUSH_MS);
     timer.unref();
   } else {
     // Unclustered: this process is the only one, so it owns both.
-    startSuggestionScheduler();
+    const shared = startSharedJobs(config, redis);
+    app.addHook('onClose', async () => shared.stop());
     if (config.metricsPort > 0) {
       const server = await startMetricsServer(config.metricsPort, () => ({
         snapshot: snapshot(),

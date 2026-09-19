@@ -1,17 +1,13 @@
 /**
- * The Fastify instance: hooks, `/health`, and the two API routes.
+ * The Fastify instance: hooks, health, relay, suggestions and catalog routes.
  *
  * WHAT THIS SERVER IS. It serves the built client and forwards proxied requests
  * to the Cloudflare Worker that dials the user's proxy. Fastify is here to route
- * and serve files, not to be a backend.
+ * and serve files, plus read shared public catalog and suggestion state.
  *
- * There are exactly two API routes and the bar for a third is high. `POST
- * /v1/fetch` is the proxy relay, reached only when a user configures a proxy.
- * `GET /v1/suggestions` serves the chat empty state's starter prompts; it is a
- * synchronous read of an in-memory pool that a timer in suggestions.ts refreshes
- * once a day, so it touches no user data, awaits nothing and cannot be made to
- * do work on demand. Anything proposed beyond these two should almost certainly
- * run in the browser instead - see the architecture note in CLAUDE.md.
+ * `POST /v1/fetch` forwards requests when a user configures a proxy.
+ * Suggestions and free-proxy endpoints only read stored data. Their public
+ * handlers cannot start generation, discovery or proxy verification.
  *
  * WHAT IT CAN SEE. Everything on the proxied path. It establishes the TLS
  * session with the provider, so requests, responses and provider API keys pass
@@ -36,8 +32,11 @@
  *     must arrive progressively; a buffering layer turns streaming chat into a
  *     long pause followed by a wall of text.
  *   - DEPENDENCIES ARE ALLOWLISTED. `fastify`, `@fastify/static`, `@fastify/middie`,
- *     pinned exact. verify:relay fails on a fourth.
+ *     and `redis`, pinned exact. verify:relay rejects other backend dependencies.
  */
+import { SharedRedis, rateLimit, RedisUnavailable } from './redis.ts';
+import { CatalogRepository } from './catalog/repository.ts';
+import { registerCatalogRoutes } from './catalog/routes.ts';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { EnvelopeError, parseRelayMeta } from "./envelope.ts";
 import {
@@ -65,37 +64,6 @@ const ISOLATION_HEADERS: Record<string, string> = {
   "Cross-Origin-Opener-Policy": "same-origin",
   "Cross-Origin-Embedder-Policy": "credentialless",
 };
-
-/**
- * Fixed-window counter keyed on client address. Deliberately in-memory: it holds
- * no request content, evaporates on restart, and needs no store. A single
- * process behind one Cloudflare zone is the expected deployment; more than one
- * would need a shared counter, and this function is where that goes.
- */
-function createRateLimiter(perMinute: number) {
-  const buckets = new Map<string, { count: number; resetAt: number }>();
-  const sweep = setInterval(() => {
-    const now = Date.now();
-    for (const [key, bucket] of buckets) if (now > bucket.resetAt) buckets.delete(key);
-  }, 60_000);
-  sweep.unref();
-
-  return (key: string): { limited: boolean; retryAfterSeconds: number } => {
-    const now = Date.now();
-    const bucket = buckets.get(key);
-    if (!bucket || now > bucket.resetAt) {
-      buckets.set(key, { count: 1, resetAt: now + 60_000 });
-      return { limited: false, retryAfterSeconds: 0 };
-    }
-    bucket.count += 1;
-    // The window's remaining time, which the caller sends as Retry-After. The
-    // client would otherwise have to assume a full window - freeProxyScan.ts
-    // did exactly that, and its own comment said it was guessing because
-    // there was no header to read. Telling it makes a scan both gentler and
-    // faster, and stops a server constant being duplicated in client code.
-    return { limited: bucket.count > perMinute, retryAfterSeconds: Math.max(1, Math.ceil((bucket.resetAt - now) / 1000)) };
-  };
-}
 
 /**
  * A bound on tunnels held open at once, per process.
@@ -151,7 +119,9 @@ function corsHeaders(config: RelayConfig, origin: string | undefined): Record<st
   };
 }
 
-export function buildApp(config: RelayConfig): FastifyInstance {
+export function buildApp(config: RelayConfig, shared?: SharedRedis): FastifyInstance {
+  const redis = shared ?? new SharedRedis(config.redis);
+  redis.start();
   // Bun 1.3.14 ignores http.request's custom connection, even with an explicit
   // Agent override. Refuse to run rather than silently send proxy traffic direct.
   if ("bun" in process.versions) {
@@ -181,6 +151,7 @@ export function buildApp(config: RelayConfig): FastifyInstance {
     // is read explicitly below, where the edge is the only thing that can set it.
     trustProxy: false,
   });
+  app.addHook('onReady', async () => { await redis.waitReady(); });
 
   // Both lines matter, and the first is the one that is easy to miss: a "*"
   // parser applies only to content types nothing else has claimed, so without
@@ -270,7 +241,9 @@ export function buildApp(config: RelayConfig): FastifyInstance {
     })
   );
 
-  const rateLimited = createRateLimiter(config.rateLimitPerMinute);
+  app.addHook('onClose', async () => { if (!shared) await redis.close(); });
+  const rateLimited = (key: string) => rateLimit(redis, config.relaySecret, key, config.rateLimitPerMinute);
+  registerCatalogRoutes(app, new CatalogRepository(redis, config.freeProxyCatalog.intervalMinutes, config.freeProxyCatalog.stateDir, config.freeProxyCatalog.maxCandidates), async key => !(await rateLimit(redis, config.relaySecret, key, 120, 'catalog')).limited);
   const tunnels = createTunnelSemaphore(config.maxInflightTunnels);
   const pool = config.poolTunnels && config.relaySecret ? new TunnelPool(config.relaySecret) : null;
 
@@ -279,11 +252,8 @@ export function buildApp(config: RelayConfig): FastifyInstance {
   /**
    * Starter prompts for the chat empty state.
    *
-   * Reads an in-memory pool and filters it. No await, no model call, and no
-   * parameter that could cause one - generation is owned entirely by the timer
-   * started below, so this endpoint costs the same whether it is called once or
-   * a million times. It cannot fail: the pool is seeded with the curated list at
-   * module load, so there is no error branch and no 5xx.
+   * Reads the Redis pool and filters it. Generation belongs only to the shared
+   * scheduler. A Redis outage falls back to the static curated suggestions.
    *
    * The query carries a day part and three capability booleans. That is the
    * whole of it - no identifier, no chat content, no history, not even a date.
@@ -303,14 +273,14 @@ export function buildApp(config: RelayConfig): FastifyInstance {
     // that header here, and do not copy this one there.
     return reply
       .header("Cache-Control", "public, max-age=900, stale-while-revalidate=86400")
-      .send(selectSuggestions({ part: parseDayPart(query.part), caps }));
+      .send(await selectSuggestions({ part: parseDayPart(query.part), caps }, redis));
   });
 
   // The scheduler is NOT started here. Under cluster it would run in every
   // worker, which means N generations a day against the keyless providers and,
   // worse, N pools that disagree - so /v1/suggestions would answer differently
   // depending on which worker took the request. index.ts runs it once, in the
-  // primary, and broadcasts the result. See getPoolSnapshot in suggestions.ts.
+  // primary, with Redis storage and ownership shared across workers.
   return app;
 }
 
@@ -318,7 +288,7 @@ async function handleRelay(
   request: FastifyRequest,
   reply: FastifyReply,
   config: RelayConfig,
-  rateLimited: (key: string) => { limited: boolean; retryAfterSeconds: number },
+  rateLimited: (key: string) => Promise<{ limited: boolean; retryAfterSeconds: number }>,
   tunnels: { tryAcquire(): (() => void) | null },
   pool: TunnelPool | null
 ): Promise<unknown> {
@@ -334,7 +304,12 @@ async function handleRelay(
   const clientKey = String(
     request.headers["cf-connecting-ip"] ?? request.socket.remoteAddress ?? "unknown"
   );
-  const limit = rateLimited(clientKey);
+  let limit: { limited: boolean; retryAfterSeconds: number };
+  try { limit = await rateLimited(clientKey); }
+  catch (error) {
+    if (!(error instanceof RedisUnavailable)) throw error;
+    return reply.header('Cache-Control', 'no-store').header('Retry-After', '5').code(503).send({error:error.message,code:'shared_state_unavailable'});
+  }
   if (limit.limited) {
     recordRejection("rate_limited");
     return reply

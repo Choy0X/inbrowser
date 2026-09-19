@@ -44,6 +44,8 @@ export const DIAL_MAX_AGE_MS = 60_000;
 export type DialProtocol = "http" | "https" | "socks5" | "socks4";
 
 export interface DialRequest {
+  /** Server-owned background probes; authenticated inside the sealed dial. */
+  purpose?: "catalog";
   /** Date.now() at seal time. See DIAL_MAX_AGE_MS. */
   ts: number;
   /** Random hex, 16 bytes. Distinguishes two dials sealed in the same millisecond. */
