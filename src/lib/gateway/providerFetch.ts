@@ -114,11 +114,28 @@ export async function* iterateSSEEvents(res: Response): AsyncGenerator<string> {
   if (!reader) return;
   const decoder = new TextDecoder();
   let buffer = "";
+  /**
+   * True when the previous read ended on a CR that has already been turned
+   * into a newline. If the next read opens with the LF that completed that
+   * CRLF, it has to be dropped or the pair becomes two line breaks - which
+   * would look like an event separator and split an event in half.
+   */
+  let carriedCr = false;
   try {
     for (;;) {
       const { done, value } = await readWithIdleTimeout(reader);
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      let text = decoder.decode(value, { stream: true });
+      if (text) {
+        // SSE permits CR, LF or CRLF as a line break, and providers do use
+        // all three - proxy/hordeSSE.ts exists because at least one sends
+        // CRLF. Searching for a blank line below without normalising first means a
+        // CRLF-framed stream never matches a separator at all, so the whole
+        // response buffers to EOF and then arrives as one unparseable block.
+        if (carriedCr && text.startsWith("\n")) text = text.slice(1);
+        carriedCr = text.endsWith("\r");
+        buffer += text.replace(/\r\n?/g, "\n");
+      }
       for (;;) {
         const sep = buffer.indexOf("\n\n");
         if (sep === -1) break;
@@ -127,6 +144,9 @@ export async function* iterateSSEEvents(res: Response): AsyncGenerator<string> {
         yield raw;
       }
     }
+    // Flush any incomplete multi-byte sequence the decoder is still holding,
+    // rather than dropping it silently at EOF.
+    buffer += decoder.decode();
     if (buffer.trim()) yield buffer.replace(/\r/g, "");
   } finally {
     reader.releaseLock();
