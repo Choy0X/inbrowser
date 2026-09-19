@@ -505,7 +505,34 @@ async function handleRelay(
       ...ISOLATION_HEADERS,
       ...corsHeaders(config, origin),
       ...sanitizeResponseHeaders(result.headers),
-      "Cache-Control": "no-store",
+      // TELLING THE EDGE NOT TO BUFFER. This deployment is required to sit
+      // behind Cloudflare with proxied DNS - install.sh issues a Cloudflare
+      // Origin Certificate and firewalls 443 to Cloudflare's ranges, so the
+      // origin is unreachable any other way - and the edge holds a response
+      // until roughly 100 KB has accumulated before flushing it. A chat reply
+      // never reaches that, so without these two headers every token arrives
+      // at once when the upstream closes, which reads as "it thought for a
+      // long time and then answered instantly".
+      //
+      // Nothing local can catch this. Caddy is already correct
+      // (flush_interval -1, no `encode`), this route hijacks and pipes without
+      // buffering, and verify-relay.ts asserts progressive delivery over real
+      // TLS on a real socket - all of which pass while the deployed site still
+      // buffers, because no test in this repo has an edge in front of it.
+      //
+      //   no-transform     stops the edge compressing the body. Compression is
+      //                    itself a buffering step: a gzip stream cannot emit
+      //                    until it has a block's worth of input, which turns
+      //                    token-sized writes into one burst.
+      //   X-Accel-Buffering  the documented opt-out nginx honours, which is
+      //                    what Cloudflare runs internally. Set by the origin,
+      //                    it overrides the proxy's own buffering default.
+      //
+      // no-store stays: that one is a privacy requirement on this path, not a
+      // performance hint. Both are set here rather than globally so
+      // /v1/suggestions keeps the edge caching it deliberately wants.
+      "Cache-Control": "no-store, no-transform",
+      "X-Accel-Buffering": "no",
     });
 
     // Only a response read to its end, on a connection the upstream left
