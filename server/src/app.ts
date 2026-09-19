@@ -541,25 +541,40 @@ async function handleRelay(
     // handed to the next request would have it parse the tail of this reply as
     // its status line. That is the likeliest way pooling goes wrong, so the
     // default on every other path is to throw the connection away.
+    //
+    // ATTACHED ONLY WHEN POOLING IS ON, and that gate is not cosmetic. Nothing
+    // else reads `complete`, and a streaming regression was bisected to the
+    // commit that added pooling - of which this listener was one of the very
+    // few things that ran on the live path with pooling off. Whether or not it
+    // was the cause, the no-pool path should execute the code it executed
+    // before pooling existed, and nothing more.
     let complete = false;
-    result.body.on("end", () => {
-      complete = true;
-    });
+    if (pool) {
+      result.body.on("end", () => {
+        complete = true;
+      });
+    }
 
     result.body.pipe(raw);
     result.body.on("error", () => raw.destroy());
     raw.on("close", () => {
       const body = result.body as NodeJS.ReadableStream & { destroy?: () => void };
-      // `complete` says the provider's body reached its end; `writableFinished`
-      // says our own response was written out in full. Both, and nothing else -
-      // `destroyed` is NOT a signal here, because a ServerResponse is destroyed
-      // as part of closing normally, so checking it would reject every healthy
-      // response and quietly disable pooling altogether.
-      const clean = complete && raw.writableFinished;
-      if (pool && pooled && result.reusable && clean) {
-        pool.give(pooled);
+      if (pool && pooled) {
+        // `complete` says the provider's body reached its end; `writableFinished`
+        // says our own response was written out in full. Both, and nothing else -
+        // `destroyed` is NOT a signal here, because a ServerResponse is destroyed
+        // as part of closing normally, so checking it would reject every healthy
+        // response and quietly disable pooling altogether.
+        const clean = complete && raw.writableFinished;
+        if (result.reusable && clean) {
+          pool.give(pooled);
+        } else {
+          pool.discard(pooled);
+          body.destroy?.();
+          tunnel.destroy();
+        }
       } else {
-        if (pooled && pool) pool.discard(pooled);
+        // Verbatim what this did before pooling existed.
         body.destroy?.();
         tunnel.destroy();
       }

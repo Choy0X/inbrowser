@@ -136,43 +136,55 @@ export async function forward(options: ForwardOptions): Promise<ForwardResult> {
       ? await wrapTls(tunnel, url.hostname, allowInsecureTls)
       : tunnel;
 
+  const requestOptions: http.RequestOptions = {
+    method: meta.method,
+    // `path` must carry the query string; `url.pathname` alone silently
+    // drops it, which for Gemini's `?alt=sse` means a non-streaming reply.
+    path: `${url.pathname}${url.search}`,
+    host: url.hostname,
+    port,
+    headers: {
+      ...meta.headers,
+      Host: url.host,
+      // We stream the response straight through, so asking for identity
+      // removes any question of who decompresses it. Costs bandwidth,
+      // removes a class of bug.
+      "Accept-Encoding": "identity",
+      // Only asked for when there is a pool to put it back into. The unpooled
+      // path still closes, which is what makes one tunnel serving one request
+      // the default rather than something to remember.
+      Connection: reuse ? "keep-alive" : "close",
+    },
+    timeout: timeoutMs,
+  };
+
+  // Exactly one of these, assigned rather than spread.
+  //
+  // Do NOT set agent:false in either case. Node then creates a default Agent
+  // and ignores createConnection, bypassing the tunnel (and sending plaintext
+  // to 443 for HTTPS targets).
+  //
+  // The unpooled branch is written to be the same thing this function did
+  // before pooling existed, because a streaming regression was bisected to the
+  // commit that introduced pooling and this was one of the few lines on the
+  // live path it touched. Keeping the two cases visibly separate means the
+  // no-pool path cannot be changed by accident while editing the pooled one.
+  if (reuse) {
+    requestOptions.agent = reuse.agent;
+  } else {
+    (requestOptions as { createConnection?: () => never }).createConnection = () => socket as never;
+  }
+
   return new Promise<ForwardResult>((resolve, reject) => {
-    const request = http.request(
-      {
-        method: meta.method,
-        // `path` must carry the query string; `url.pathname` alone silently
-        // drops it, which for Gemini's `?alt=sse` means a non-streaming reply.
-        path: `${url.pathname}${url.search}`,
-        host: url.hostname,
-        port,
-        headers: {
-          ...meta.headers,
-          Host: url.host,
-          // We stream the response straight through, so asking for identity
-          // removes any question of who decompresses it. Costs bandwidth,
-          // removes a class of bug.
-          "Accept-Encoding": "identity",
-          // Only asked for when there is a pool to put it back into. The
-          // unpooled path still closes, which is what makes one tunnel serving
-          // one request the default rather than something to remember.
-          Connection: reuse ? "keep-alive" : "close",
-        },
-        // A bound agent on the pooled path, a bare createConnection otherwise.
-        // Do NOT set agent:false in either case. Node then creates a default
-        // Agent and ignores createConnection, bypassing the tunnel (and sending
-        // plaintext to 443 for HTTPS targets).
-        ...(reuse ? { agent: reuse.agent } : { createConnection: () => socket as never }),
-        timeout: timeoutMs,
-      },
-      (response) => {
-        resolve({
-          status: response.statusCode ?? 502,
-          headers: response.headers,
-          body: response,
-          reusable: Boolean(reuse) && isReusable(response),
-        });
-      }
-    );
+    const request = http.request(requestOptions, (response) => {
+      resolve({
+        status: response.statusCode ?? 502,
+        headers: response.headers,
+        body: response,
+        // Only asked when there is somewhere to put the connection back.
+        reusable: reuse ? isReusable(response) : false,
+      });
+    });
 
     request.on("error", reject);
     request.on("timeout", () => {
