@@ -40,6 +40,7 @@ import {
   type ChatMessageInput,
 } from "./lib/onniroute";
 import { migrateProxies } from "./lib/gatewaySettings";
+import { ensureDefaultProviderDiscovery, ensureDefaultProxies } from "./lib/gateway/defaultSeeding";
 import {
   clearConversations,
   flushConversations,
@@ -1486,6 +1487,33 @@ export default function App() {
     },
     [refreshGateway]
   );
+
+  // One-time default-seed bootstrap: gatewaySettings.ts's getSettings() already
+  // seeded keyless provider connections synchronously (see
+  // withDefaultProviderSeed), so this only covers the two steps that need the
+  // network - discovering their real model catalogs, and populating a starter
+  // proxy pool via the same "smart selection" the free-proxy finder uses. Both
+  // are flag-gated in defaultSeeding.ts and persist themselves; this effect
+  // just reflects whatever they changed into UI state.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const afterDiscovery = await ensureDefaultProviderDiscovery(settings);
+      if (cancelled) return;
+      if (afterDiscovery !== settings) setSettings(afterDiscovery);
+      const afterProxies = await ensureDefaultProxies(afterDiscovery);
+      if (cancelled) return;
+      if (afterProxies !== afterDiscovery) setSettings(afterProxies);
+      if (afterDiscovery !== settings || afterProxies !== afterDiscovery) void refreshGateway();
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Runs exactly once on mount - settings/refreshGateway are read from the
+    // closure over the initial values deliberately, since this is a one-shot
+    // bootstrap, not a subscription to later settings changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleTestConnection = useCallback(async (connection: ProviderConnection) => {
     return testProviderConnection(connection);

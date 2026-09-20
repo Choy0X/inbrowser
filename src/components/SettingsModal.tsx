@@ -52,8 +52,14 @@ import { dismissLegacyProxyNotice, legacyProxyCount, legacyProxyExport } from ".
 import { listModels } from "../lib/gateway/omniroute";
 import type { OmniModel, ProxyProtocol } from "../lib/types";
 import { PROXY_PROTOCOLS, proxySupportsPassword } from "../lib/types";
-import { classifyModelCapabilities } from "../lib/capabilities";
 import { PROVIDER_PRESETS, type PresetCategory, type ProviderPreset } from "../lib/gateway/providerPresets";
+import {
+  isPresetAlreadyAdded,
+  mergeDiscoveredModels,
+  newConnectionFromPreset,
+  presetForConnection,
+  requiresVerifiedKey,
+} from "../lib/gateway/presetConnections";
 import { newId, type ThemeMode } from "../lib/store";
 import { allTools } from "../lib/tools/registry";
 import type { Preferences, MemoryItem } from "../lib/preferences";
@@ -183,58 +189,6 @@ function newConnection(): ProviderConnection {
 
 function newProxy(): CustomProxy {
   return { id: newId(), label: "", protocol: "socks5", host: "", port: 1080, username: "", password: "", enabled: true };
-}
-
-/** Capability-backfilled starter models for a freshly-added preset connection (see providerPresets.ts). */
-function starterModels(ids: string[]): ProviderConnection["models"] {
-  return ids.map((id) => {
-    const guessed = classifyModelCapabilities(id);
-    return { id, supportsVision: guessed.vision, supportsVideo: guessed.video, supportsReasoning: guessed.reasoning };
-  });
-}
-
-/** True when a connection already points at this preset's base URL — i.e. the user has already added this provider. */
-function isPresetAlreadyAdded(preset: ProviderPreset, existing: ProviderConnection[]): boolean {
-  const target = preset.baseUrl.trim().toLowerCase();
-  return existing.some((c) => c.baseUrl.trim().toLowerCase() === target);
-}
-
-/** The catalog preset a connection's base URL matches, if any — connections aren't tagged with
- *  their origin preset, so this is inferred the same way isPresetAlreadyAdded checks the reverse. */
-function presetForConnection(connection: ProviderConnection): ProviderPreset | undefined {
-  const target = connection.baseUrl.trim().toLowerCase();
-  return PROVIDER_PRESETS.find((p) => p.baseUrl.trim().toLowerCase() === target);
-}
-
-/** Keyless presets leave the key optional (it only raises rate limits). An "inference-keyed"
- *  preset has no real access without one, so unlike every other provider here, it must not be
- *  enabled until its key is filled in AND a Test against the real endpoint has succeeded. */
-function requiresVerifiedKey(connection: ProviderConnection): boolean {
-  return presetForConnection(connection)?.category === "inference-keyed";
-}
-
-/** Picks a unique alias for a new preset connection, avoiding collisions with already-configured ones. */
-function uniqueAlias(suggestion: string, existing: ProviderConnection[]): string {
-  const used = new Set(existing.map((c) => c.alias));
-  if (!used.has(suggestion)) return suggestion;
-  let n = 2;
-  while (used.has(`${suggestion}${n}`)) n += 1;
-  return `${suggestion}${n}`;
-}
-
-function newConnectionFromPreset(preset: ProviderPreset, existing: ProviderConnection[]): ProviderConnection {
-  return {
-    id: newId(),
-    alias: uniqueAlias(preset.aliasSuggestion, existing),
-    label: preset.label,
-    format: preset.format,
-    baseUrl: preset.baseUrl,
-    apiKey: "",
-    models: starterModels(preset.starterModels),
-    // inference-keyed presets have no access without a key yet, so they start
-    // off until a key is entered and Test confirms it actually works.
-    enabled: preset.category !== "inference-keyed",
-  };
 }
 
 // Stable "idle" fallback so cards whose test/discovery hasn't run don't get a
@@ -681,14 +635,7 @@ export function SettingsModal({
       setDiscoveryByConnectionId((s) => ({ ...s, [connection.id]: { status: "testing" } }));
       try {
         const discovered = await discoverModels(connection);
-        // Merge by id rather than replacing wholesale — a re-discover should
-        // keep each still-present model's enabled/disabled choice (from the
-        // Models select field) and only default genuinely new ids to enabled.
-        const existingById = new Map(connection.models.map((m) => [m.id, m]));
-        const models = discovered.map((m) => {
-          const existing = existingById.get(m.id);
-          return existing ? { ...m, enabled: existing.enabled } : { ...m, enabled: true };
-        });
+        const models = mergeDiscoveredModels(connection.models, discovered);
         updateConnection(connection.id, { models });
         setDiscoveryByConnectionId((s) => ({ ...s, [connection.id]: { status: "ok", result: models.length } }));
       } catch (err) {

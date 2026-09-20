@@ -23,8 +23,18 @@ import type {
 } from "./types";
 import { PROXY_PROTOCOLS } from "./types";
 import { DEFAULT_SEARCH_BACKEND } from "./appConfig";
+import { defaultProviderConnections } from "./gateway/presetConnections";
 
 const SETTINGS_KEY = "fachoy:settings:v1";
+
+/**
+ * Set the first time getSettings() runs after this shipped, regardless of
+ * whether providers were empty - that is what makes a brand-new install and
+ * an existing install with an empty provider list get the same one-time seed
+ * of every keyless preset, while never touching an install that already has
+ * providers configured or re-seeding one where the user later empties it.
+ */
+const PROVIDERS_DEFAULT_SEED_KEY = "fachoy:providers:default-seed:v1";
 
 /**
  * Where proxies configured against the old CORS-forwarding transport are kept
@@ -85,7 +95,7 @@ export function getSettings(): GatewaySettings {
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<GatewaySettings>;
       const defaults = defaultSettings();
-      return {
+      return withDefaultProviderSeed({
         mode: parsed.mode === "omniroute" ? "omniroute" : "direct",
         omniroute: { ...defaults.omniroute, ...parsed.omniroute },
         providers: Array.isArray(parsed.providers) ? parsed.providers : [],
@@ -99,12 +109,33 @@ export function getSettings(): GatewaySettings {
         relayUrl: "",
         allowInsecureProxyTls: parsed.allowInsecureProxyTls === true,
         search: migrateSearchSettings(parsed.search) ?? defaults.search,
-      };
+      });
     }
   } catch {
     /* ignore */
   }
-  return defaultSettings();
+  return withDefaultProviderSeed(defaultSettings());
+}
+
+/**
+ * Pre-adds every keyless provider preset, enabled, the first time this browser
+ * ever calls getSettings() after this shipped. Kept out of defaultSettings()
+ * itself, which is also called above purely to source default field values
+ * during the merge branch - making that call stateful would risk generating a
+ * second, unused batch of connections with different ids on every load that
+ * still has other saved settings.
+ */
+function withDefaultProviderSeed(settings: GatewaySettings): GatewaySettings {
+  try {
+    if (localStorage.getItem(PROVIDERS_DEFAULT_SEED_KEY)) return settings;
+    localStorage.setItem(PROVIDERS_DEFAULT_SEED_KEY, "1");
+    if (settings.providers.length > 0) return settings;
+    const seeded = { ...settings, providers: defaultProviderConnections() };
+    saveSettings(seeded);
+    return seeded;
+  } catch {
+    return settings;
+  }
 }
 
 /**
