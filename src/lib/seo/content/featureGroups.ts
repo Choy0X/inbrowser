@@ -79,8 +79,8 @@ export const FEATURE_GROUPS: FeatureGroup[] = [
       },
       {
         name: "Bring-your-own gateway",
-        description: "Point the app at your own self-hosted OmniRoute gateway instead of connecting to providers directly.",
-        example: "Run OmniRoute on a home server, enter its URL in Settings, and route every chat through it.",
+        description: "Point the app at your own self-hosted gateway server instead of connecting to providers directly.",
+        example: "Run a gateway implementing the OmniRoute protocol (github.com/diegosouzapw/OmniRoute) on a home server, enter its URL in Settings, and route every chat through it.",
       },
       {
         name: "Real proxy support",

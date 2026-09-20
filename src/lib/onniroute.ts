@@ -6,9 +6,10 @@
  *    client-side (`ProviderConnection` in ./types), requests are translated
  *    via the matching format adapter (./gateway/adapters) and auto-routed
  *    by ./gateway/autoRoute.ts.
- *  - "omniroute": talks to a real, externally-running OmniRoute gateway
- *    instance (./gateway/omniroute.ts), the way InBrowser worked before Direct
- *    mode existed — single baseUrl/apiKey, server-side auto-routing.
+ *  - "gateway": talks to a real, externally-running server implementing the
+ *    OmniRoute protocol (./gateway/selfHostedGateway.ts), the way InBrowser
+ *    worked before Direct mode existed — single baseUrl/apiKey, server-side
+ *    auto-routing.
  * Both modes call providers directly from the browser
  * (./gateway/providerFetch.ts). The default path ships no server of its own, so
  * a provider must send CORS headers to be usable - and, more importantly, every
@@ -58,7 +59,7 @@ import * as geminiMedia from "./gateway/media/gemini";
 import { search as duckduckgoSearch } from "./gateway/search/duckduckgo";
 import { search as serperSearch } from "./gateway/search/serper";
 import { search as jinaSearch } from "./gateway/search/jina";
-import * as omni from "./gateway/omniroute";
+import * as gateway from "./gateway/selfHostedGateway";
 import { routingFailure } from "./gateway/routingFailure";
 import { createProtocolOutputGuard, cleanProtocolOutput } from "./gateway/protocolOutput";
 import { validateToolCalls } from "./gateway/toolValidation";
@@ -82,7 +83,7 @@ export type {
   CustomProxy,
   ProxyRoutingMode,
 } from "./types";
-export type { OmniRouteTestResult } from "./gateway/omniroute";
+export type { GatewayTestResult } from "./gateway/selfHostedGateway";
 
 // ---------------------------------------------------------------- settings
 
@@ -98,7 +99,7 @@ import { getSettings } from "./gatewaySettings";
 import { MAX_ROUTING_ATTEMPTS } from "./appConfig";
 
 export {
-  DEFAULT_OMNIROUTE_URL,
+  GATEWAY_URL_PLACEHOLDER,
   defaultSettings,
   dismissLegacyProxyNotice,
   getSettings,
@@ -109,8 +110,8 @@ export {
 } from "./gatewaySettings";
 export type {
   ConnectionMode,
+  GatewayConnectionSettings,
   GatewaySettings,
-  OmniRouteConnectionSettings,
 } from "./gatewaySettings";
 
 /** Model list derived purely from configured connections — no network call.
@@ -137,9 +138,9 @@ export function modelsFromProviders(providers: ProviderConnection[]): OmniModel[
   return out.sort((a, b) => (a.id === "auto" ? -1 : b.id === "auto" ? 1 : a.id.localeCompare(b.id)));
 }
 
-/** Fallback model list derived from the OmniRoute manifest (reachable keyless),
+/** Fallback model list derived from the gateway's manifest (reachable keyless),
  *  used when /v1/models requires a key the client hasn't set. */
-function modelsFromManifest(manifest: Awaited<ReturnType<typeof omni.fetchManifest>>): OmniModel[] {
+function modelsFromManifest(manifest: Awaited<ReturnType<typeof gateway.fetchManifest>>): OmniModel[] {
   if (!manifest) return [];
   const seen = new Set<string>();
   const out: OmniModel[] = [];
@@ -157,9 +158,9 @@ function modelsFromManifest(manifest: Awaited<ReturnType<typeof omni.fetchManife
 
 /**
  * Mode-aware model list + capability index. Direct mode builds synchronously
- * from configured connections; OmniRoute mode fetches the gateway's manifest
- * and model list over the network. Always async so callers have one code
- * path regardless of mode.
+ * from configured connections; gateway mode fetches the connected gateway's
+ * manifest and model list over the network. Always async so callers have one
+ * code path regardless of mode.
  */
 export async function loadModelsAndCapabilities(): Promise<{ models: OmniModel[]; index: CapabilityIndex; ok: boolean }> {
   const settings = getSettings();
@@ -170,12 +171,12 @@ export async function loadModelsAndCapabilities(): Promise<{ models: OmniModel[]
       ok: settings.providers.some((p) => p.enabled),
     };
   }
-  const { baseUrl, apiKey } = settings.omniroute;
+  const { baseUrl, apiKey } = settings.gateway;
   try {
-    const manifest = await omni.fetchManifest(baseUrl);
+    const manifest = await gateway.fetchManifest(baseUrl);
     let models: OmniModel[] = [];
     try {
-      models = await omni.listModels(baseUrl, apiKey);
+      models = await gateway.listModels(baseUrl, apiKey);
     } catch {
       // /v1/models can 401 keyless; the manifest (reachable keyless) covers it.
     }
@@ -307,7 +308,7 @@ export interface ChatStreamOptions {
    * Skip classification and route "auto" to the strongest available model
    * regardless of how simple this turn's prompt looks - for a caller that
    * already knows it wants the best model (a swarm's synthesis step), not
-   * one whose need is inferable from the request. No-op in omniroute mode:
+   * one whose need is inferable from the request. No-op in gateway mode:
    * that mode delegates routing entirely to an external gateway this app
    * has no control over.
    */
@@ -399,12 +400,12 @@ function classifyChatFailure(
 /** Stream a chat completion. Resolves "auto" via the auto-router and fails over across candidates. */
 export async function chatStream(options: ChatStreamOptions): Promise<ChatStreamResult> {
   const settings = getSettings();
-  if (settings.mode === "omniroute") {
+  if (settings.mode === "gateway") {
     // forceCapableModel is a no-op here: routing is entirely the external
     // gateway's decision in this mode, not something resolve()/scoreAndPick()
     // below ever gets a say in.
-    const { baseUrl, apiKey } = settings.omniroute;
-    // External gateway mode sends directly to the gateway. Its own upstream
+    const { baseUrl, apiKey } = settings.gateway;
+    // Gateway mode sends directly to the gateway. Its own upstream
     // proxy configuration is not visible to this client.
     const resolvedProxy = null;
     const policy = responsePolicyFor(options.model, options.messages, options.allowArtifacts);
@@ -416,7 +417,7 @@ export async function chatStream(options: ChatStreamOptions): Promise<ChatStream
         options.onProxyUsed?.(resolvedProxy);
       }
     };
-    const result = await omni.chatStream({
+    const result = await gateway.chatStream({
       baseUrl,
       apiKey,
       model: options.model,
@@ -703,9 +704,9 @@ export interface CompletionOptions {
 /** Non-streaming completion used for background work (auto-memory extraction, scheduled tasks). */
 export async function runCompletion(options: CompletionOptions): Promise<string> {
   const settings = getSettings();
-  if (settings.mode === "omniroute") {
-    const { baseUrl, apiKey } = settings.omniroute;
-    return omni.runCompletion({
+  if (settings.mode === "gateway") {
+    const { baseUrl, apiKey } = settings.gateway;
+    return gateway.runCompletion({
       baseUrl,
       apiKey,
       model: options.model,
@@ -891,9 +892,9 @@ export async function testProviderConnection(connection: ProviderConnection): Pr
   throw lastErr;
 }
 
-/** Connection test for OmniRoute mode — mirrors the pre-rework testChatConnection, richer result shape. */
-export async function testOmniRouteConnection(baseUrl: string, apiKey: string): Promise<omni.OmniRouteTestResult> {
-  return omni.testConnection(baseUrl, apiKey);
+/** Connection test for gateway mode — mirrors the pre-rework testChatConnection, richer result shape. */
+export async function testGatewayConnection(baseUrl: string, apiKey: string): Promise<gateway.GatewayTestResult> {
+  return gateway.testConnection(baseUrl, apiKey);
 }
 
 export interface ProxyTestResult {
@@ -960,12 +961,12 @@ export async function testProxyConnection(proxy: CustomProxy, relayUrl?: string,
 
 // ---------------------------------------------------------------- web search
 
-/** Run a web search through the configured backend (direct mode: Settings → Search; omniroute mode: the gateway's own /v1/search). */
+/** Run a web search through the configured backend (direct mode: Settings → Search; gateway mode: the connected gateway's own /v1/search). */
 export async function webSearch(query: string, signal?: AbortSignal): Promise<MessageSearch> {
   const settings = getSettings();
-  if (settings.mode === "omniroute") {
-    const { baseUrl, apiKey } = settings.omniroute;
-    return omni.webSearch(baseUrl, apiKey, query, signal);
+  if (settings.mode === "gateway") {
+    const { baseUrl, apiKey } = settings.gateway;
+    return gateway.webSearch(baseUrl, apiKey, query, signal);
   }
   const backend = settings.search.provider;
   const apiKey = settings.search.apiKey;
@@ -1023,8 +1024,8 @@ export interface GenerateImageOptions {
 
 export async function generateImages(options: GenerateImageOptions): Promise<GeneratedMedia[]> {
   const settings = getSettings();
-  if (settings.mode === "omniroute") {
-    const urls = await omni.generateImages(settings.omniroute.baseUrl, settings.omniroute.apiKey, options);
+  if (settings.mode === "gateway") {
+    const urls = await gateway.generateImages(settings.gateway.baseUrl, settings.gateway.apiKey, options);
     return urls.map((url) => ({ kind: "image", url, prompt: options.prompt, model: options.model }));
   }
   const { connection, modelId } = pickMediaConnection(settings.providers, options.model, "image");
@@ -1053,8 +1054,8 @@ export async function editImages(options: {
   signal?: AbortSignal;
 }): Promise<GeneratedMedia[]> {
   const settings = getSettings();
-  if (settings.mode === "omniroute") {
-    const urls = await omni.editImages(settings.omniroute.baseUrl, settings.omniroute.apiKey, options);
+  if (settings.mode === "gateway") {
+    const urls = await gateway.editImages(settings.gateway.baseUrl, settings.gateway.apiKey, options);
     return urls.map((url) => ({ kind: "image", url, prompt: options.prompt, model: options.model }));
   }
   const { connection, modelId } = pickMediaConnection(settings.providers, options.model, "image");
@@ -1073,8 +1074,8 @@ export interface GenerateVideoOptions {
 
 export async function generateVideo(options: GenerateVideoOptions): Promise<GeneratedMedia[]> {
   const settings = getSettings();
-  if (settings.mode === "omniroute") {
-    const urls = await omni.generateVideo(settings.omniroute.baseUrl, settings.omniroute.apiKey, options);
+  if (settings.mode === "gateway") {
+    const urls = await gateway.generateVideo(settings.gateway.baseUrl, settings.gateway.apiKey, options);
     return urls.map((url) => ({ kind: "video", url, prompt: options.prompt, model: options.model }));
   }
   const { connection, modelId } = pickMediaConnection(settings.providers, options.model, "video");
@@ -1092,8 +1093,8 @@ export async function generateVideo(options: GenerateVideoOptions): Promise<Gene
 
 export async function transcribeAudioFile(file: Blob, name: string): Promise<string> {
   const settings = getSettings();
-  if (settings.mode === "omniroute") {
-    return omni.transcribeAudioFile(settings.omniroute.baseUrl, settings.omniroute.apiKey, file, name);
+  if (settings.mode === "gateway") {
+    return gateway.transcribeAudioFile(settings.gateway.baseUrl, settings.gateway.apiKey, file, name);
   }
   const connection = settings.providers.find((c) => c.enabled && c.format === "openai");
   if (!connection) {

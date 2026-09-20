@@ -1,8 +1,9 @@
 /**
  * Shared OpenAI-chat-completions-shaped response handling — used by both
  * adapters/openai.ts (any "openai" format ProviderConnection) and
- * gateway/omniroute.ts (a real OmniRoute gateway's /v1/chat/completions,
- * which speaks the same OpenAI chunk/response shape). Kept here once rather
+ * gateway/selfHostedGateway.ts (a self-hosted gateway speaking the OmniRoute
+ * protocol's /v1/chat/completions, which uses the same OpenAI chunk/response
+ * shape). Kept here once rather
  * than duplicated across both call sites.
  */
 import type { ToolCallWire } from "./types";

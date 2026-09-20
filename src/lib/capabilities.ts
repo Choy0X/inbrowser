@@ -49,7 +49,7 @@ export function buildCapabilityIndexFromProviders(connections: ProviderConnectio
   return index;
 }
 
-/** OmniRoute mode: build the index from the gateway's own provider-plugin-manifest. */
+/** Gateway mode: build the index from the connected gateway's own provider-plugin-manifest. */
 export function buildCapabilityIndexFromManifest(manifest: ProviderPluginManifest | null): CapabilityIndex {
   const index: CapabilityIndex = {
     byAlias: new Map(),

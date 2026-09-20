@@ -29,8 +29,8 @@ export interface ProviderPluginModel {
 
 /**
  * Provider/model catalog shape served by a real OmniRoute gateway's
- * `/api/v1/provider-plugin-manifest` endpoint (OmniRoute connection mode
- * only — see ConnectionMode in src/lib/onniroute.ts).
+ * `/api/v1/provider-plugin-manifest` endpoint (gateway connection mode
+ * only — see ConnectionMode in src/lib/gatewaySettings.ts).
  */
 export interface ProviderPluginManifestEntry {
   id: string;

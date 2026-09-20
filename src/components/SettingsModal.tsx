@@ -37,9 +37,9 @@ import {
 import type {
   ConnectionMode,
   CustomProxy,
+  GatewayConnectionSettings,
   GatewaySettings,
-  OmniRouteConnectionSettings,
-  OmniRouteTestResult,
+  GatewayTestResult,
   ProviderConnection,
   ProviderFormat,
   ProxyRoutingMode,
@@ -47,9 +47,9 @@ import type {
   SearchBackend,
   TestResult,
 } from "../lib/onniroute";
-import { DEFAULT_OMNIROUTE_URL, discoverModels } from "../lib/onniroute";
+import { GATEWAY_URL_PLACEHOLDER, discoverModels } from "../lib/onniroute";
 import { dismissLegacyProxyNotice, legacyProxyCount, legacyProxyExport } from "../lib/gatewaySettings";
-import { listModels } from "../lib/gateway/omniroute";
+import { listModels } from "../lib/gateway/selfHostedGateway";
 import type { OmniModel, ProxyProtocol } from "../lib/types";
 import { PROXY_PROTOCOLS, proxySupportsPassword } from "../lib/types";
 import { PROVIDER_PRESETS, type PresetCategory, type ProviderPreset } from "../lib/gateway/providerPresets";
@@ -83,7 +83,7 @@ interface SettingsModalProps {
   settings: GatewaySettings;
   onSave: (settings: GatewaySettings) => void;
   onTestConnection: (connection: ProviderConnection) => Promise<TestResult>;
-  onTestOmniRoute: (baseUrl: string, apiKey: string) => Promise<OmniRouteTestResult>;
+  onTestGateway: (baseUrl: string, apiKey: string) => Promise<GatewayTestResult>;
   onTestProxy: (proxy: CustomProxy, relayUrl?: string, allowInsecureProxyTls?: boolean) => Promise<ProxyTestResult>;
   theme: ThemeMode;
   onThemeChange: (theme: ThemeMode) => void;
@@ -104,13 +104,13 @@ type TestState<R> =
 const MODE_OPTIONS: { value: ConnectionMode; label: string; description: string }[] = [
   {
     value: "direct",
-    label: "Browser-Hosted OmniRoute",
+    label: "Direct Connection",
     description: "Browser-native — talk to each provider (OpenAI, Anthropic, Gemini, ...) directly, no external gateway needed.",
   },
   {
-    value: "omniroute",
-    label: "OmniRoute Gateway",
-    description: "Point at a real OmniRoute gateway instance for chat, models, search, and media.",
+    value: "gateway",
+    label: "Self-Hosted Gateway",
+    description: "Point at a self-hosted gateway server for chat, models, search, and media.",
   },
 ];
 
@@ -397,7 +397,7 @@ export function SettingsModal({
   settings,
   onSave,
   onTestConnection,
-  onTestOmniRoute,
+  onTestGateway,
   onTestProxy,
   theme,
   onThemeChange,
@@ -411,7 +411,7 @@ export function SettingsModal({
   const [tab, setTab] = useState<SettingsTab>(initialTab);
   const [draftTheme, setDraftTheme] = useState<ThemeMode>(theme);
   const [draftMode, setDraftMode] = useState<ConnectionMode>(settings.mode);
-  const [draftOmniRoute, setDraftOmniRoute] = useState<OmniRouteConnectionSettings>(settings.omniroute);
+  const [draftGateway, setDraftGateway] = useState<GatewayConnectionSettings>(settings.gateway);
   const [draftProviders, setDraftProviders] = useState<ProviderConnection[]>(settings.providers);
   const [draftProxies, setDraftProxies] = useState<CustomProxy[]>(settings.proxies);
   const [draftProxiesEnabled, setDraftProxiesEnabled] = useState(settings.proxiesEnabled !== false);
@@ -423,8 +423,8 @@ export function SettingsModal({
   const [draftSearch, setDraftSearch] = useState(settings.search);
   const [testByConnectionId, setTestByConnectionId] = useState<Record<string, TestState<TestResult>>>({});
   const [testByProxyId, setTestByProxyId] = useState<Record<string, TestState<ProxyTestResult>>>({});
-  const [omniRouteTest, setOmniRouteTest] = useState<TestState<OmniRouteTestResult>>({ status: "idle" });
-  const [omniRouteModels, setOmniRouteModels] = useState<TestState<OmniModel[]>>({ status: "idle" });
+  const [gatewayTest, setGatewayTest] = useState<TestState<GatewayTestResult>>({ status: "idle" });
+  const [gatewayModels, setGatewayModels] = useState<TestState<OmniModel[]>>({ status: "idle" });
   const [presetPickerOpen, setPresetPickerOpen] = useState(false);
   const [presetSearch, setPresetSearch] = useState("");
   const [duplicatePreset, setDuplicatePreset] = useState<ProviderPreset | null>(null);
@@ -452,7 +452,7 @@ export function SettingsModal({
       setTab(initialTab);
       setDraftTheme(theme);
       setDraftMode(settings.mode);
-      setDraftOmniRoute(settings.omniroute);
+      setDraftGateway(settings.gateway);
       setDraftProviders(settings.providers);
       setDraftProxies(settings.proxies);
       setDraftProxiesEnabled(settings.proxiesEnabled !== false);
@@ -467,8 +467,8 @@ export function SettingsModal({
       setSelectedProxyId(null);
       setFreeProxyFinderOpen(false);
       setProxyIoMode(null);
-      setOmniRouteTest({ status: "idle" });
-      setOmniRouteModels({ status: "idle" });
+      setGatewayTest({ status: "idle" });
+      setGatewayModels({ status: "idle" });
       setPresetPickerOpen(false);
       setPresetSearch("");
       setDuplicatePreset(null);
@@ -664,39 +664,39 @@ export function SettingsModal({
     [onTestConnection]
   );
 
-  const runOmniRouteTest = async () => {
-    setOmniRouteTest({ status: "testing" });
+  const runGatewayTest = async () => {
+    setGatewayTest({ status: "testing" });
     try {
-      const result = await onTestOmniRoute(draftOmniRoute.baseUrl, draftOmniRoute.apiKey);
-      setOmniRouteTest({ status: "ok", result });
+      const result = await onTestGateway(draftGateway.baseUrl, draftGateway.apiKey);
+      setGatewayTest({ status: "ok", result });
     } catch (err) {
-      setOmniRouteTest({ status: "fail", message: err instanceof Error ? err.message : String(err) });
+      setGatewayTest({ status: "fail", message: err instanceof Error ? err.message : String(err) });
     }
   };
 
   // Live, read-only mirror of the connected gateway's own /v1/models — not a
-  // picker (the real OmniRoute server owns provider/model routing
-  // server-side), just confirms what it actually reports. Debounced so
-  // typing a base URL/key doesn't fire a request per keystroke.
+  // picker (the gateway owns provider/model routing server-side), just
+  // confirms what it actually reports. Debounced so typing a base URL/key
+  // doesn't fire a request per keystroke.
   useEffect(() => {
-    if (!open || draftMode !== "omniroute") {
-      setOmniRouteModels({ status: "idle" });
+    if (!open || draftMode !== "gateway") {
+      setGatewayModels({ status: "idle" });
       return;
     }
-    const baseUrl = draftOmniRoute.baseUrl.trim();
+    const baseUrl = draftGateway.baseUrl.trim();
     if (!baseUrl) {
-      setOmniRouteModels({ status: "idle" });
+      setGatewayModels({ status: "idle" });
       return;
     }
     let cancelled = false;
-    setOmniRouteModels({ status: "testing" });
+    setGatewayModels({ status: "testing" });
     const timer = setTimeout(async () => {
       try {
-        const models = await listModels(baseUrl, draftOmniRoute.apiKey);
-        if (!cancelled) setOmniRouteModels({ status: "ok", result: models });
+        const models = await listModels(baseUrl, draftGateway.apiKey);
+        if (!cancelled) setGatewayModels({ status: "ok", result: models });
       } catch (err) {
         if (!cancelled) {
-          setOmniRouteModels({ status: "fail", message: err instanceof Error ? err.message : String(err) });
+          setGatewayModels({ status: "fail", message: err instanceof Error ? err.message : String(err) });
         }
       }
     }, 500);
@@ -704,7 +704,7 @@ export function SettingsModal({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [open, draftMode, draftOmniRoute.baseUrl, draftOmniRoute.apiKey]);
+  }, [open, draftMode, draftGateway.baseUrl, draftGateway.apiKey]);
 
   const filteredMemories = useMemo(() => {
     const q = memoryFilter.trim().toLowerCase();
@@ -713,10 +713,10 @@ export function SettingsModal({
 
   // Group the gateway's /v1/models response by its alias prefix (?prefix=alias
   // means every id already comes back as "<alias>/<modelId>").
-  const omniRouteModelGroups = useMemo(() => {
-    if (omniRouteModels.status !== "ok") return [];
+  const gatewayModelGroups = useMemo(() => {
+    if (gatewayModels.status !== "ok") return [];
     const groups = new Map<string, string[]>();
-    for (const model of omniRouteModels.result) {
+    for (const model of gatewayModels.result) {
       const slash = model.id.indexOf("/");
       const alias = slash === -1 ? model.id : model.id.slice(0, slash);
       const rest = slash === -1 ? model.id : model.id.slice(slash + 1);
@@ -725,7 +725,7 @@ export function SettingsModal({
       else groups.set(alias, [rest]);
     }
     return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b));
-  }, [omniRouteModels]);
+  }, [gatewayModels]);
 
   if (!open) return null;
 
@@ -771,7 +771,7 @@ export function SettingsModal({
     });
     onSave({
       mode: draftMode,
-      omniroute: draftOmniRoute,
+      gateway: draftGateway,
       providers,
       proxies: draftProxies,
       proxiesEnabled: draftProxiesEnabled,
@@ -1064,36 +1064,35 @@ export function SettingsModal({
                 ))}
               </div>
 
-              {draftMode === "omniroute" && (
+              {draftMode === "gateway" && (
                 <>
                   <div>
-                    <label className="mb-1.5 block text-sm font-medium" htmlFor="omniroute-base-url">
-                      OmniRoute base URL
+                    <label className="mb-1.5 block text-sm font-medium" htmlFor="gateway-base-url">
+                      Gateway base URL
                     </label>
                     <Input
-                      id="omniroute-base-url"
-                      value={draftOmniRoute.baseUrl}
-                      onChange={(e) => setDraftOmniRoute((s) => ({ ...s, baseUrl: e.target.value }))}
-                      placeholder={DEFAULT_OMNIROUTE_URL}
+                      id="gateway-base-url"
+                      value={draftGateway.baseUrl}
+                      onChange={(e) => setDraftGateway((s) => ({ ...s, baseUrl: e.target.value }))}
+                      placeholder={GATEWAY_URL_PLACEHOLDER}
                       spellCheck={false}
                     />
                     <p className="mt-1.5 text-xs text-fg-faint">
-                      Requests are relayed through this app's local server to reach OmniRoute, so the
-                      default works as-is from any device on the network — no need to change it just
-                      because you're not on localhost. Only change this if OmniRoute itself runs
-                      somewhere other than this server's own machine.
+                      Point this at a server implementing the OmniRoute protocol
+                      (github.com/diegosouzapw/OmniRoute) — chat, search, media, and its
+                      provider-plugin-manifest endpoint. Not pre-filled; most people don't have one running.
                     </p>
                   </div>
 
                   <div>
-                    <label className="mb-1.5 block text-sm font-medium" htmlFor="omniroute-api-key">
+                    <label className="mb-1.5 block text-sm font-medium" htmlFor="gateway-api-key">
                       API key (optional)
                     </label>
                     <Input
-                      id="omniroute-api-key"
+                      id="gateway-api-key"
                       type="password"
-                      value={draftOmniRoute.apiKey}
-                      onChange={(e) => setDraftOmniRoute((s) => ({ ...s, apiKey: e.target.value }))}
+                      value={draftGateway.apiKey}
+                      onChange={(e) => setDraftGateway((s) => ({ ...s, apiKey: e.target.value }))}
                       placeholder="Leave blank for keyless local access"
                       spellCheck={false}
                     />
@@ -1102,53 +1101,41 @@ export function SettingsModal({
                     </p>
                   </div>
 
-                  <div>
-                    <div className="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
-                      Available on this gateway
-                      {omniRouteModels.status === "testing" && (
-                        <Loader2 size={13} className="animate-spin text-fg-faint" />
+                  {gatewayModels.status === "ok" && (
+                    <div>
+                      <div className="mb-1.5 text-sm font-medium">Available on this gateway</div>
+                      {gatewayModelGroups.length === 0 ? (
+                        <p className="text-xs text-fg-faint">No models reported by this gateway.</p>
+                      ) : (
+                        <div className="max-h-48 space-y-1 overflow-y-auto rounded-xl border border-border-subtle bg-canvas p-2">
+                          {gatewayModelGroups.map(([alias, models]) => (
+                            <details key={alias} className="text-xs">
+                              <summary className="cursor-pointer select-none py-0.5 font-medium text-fg-dim">
+                                {alias} <span className="font-normal text-fg-faint">({models.length})</span>
+                              </summary>
+                              <ul className="mt-0.5 space-y-0.5 pl-3 text-fg-faint">
+                                {models.map((id) => (
+                                  <li key={id} className="truncate">
+                                    {id}
+                                  </li>
+                                ))}
+                              </ul>
+                            </details>
+                          ))}
+                        </div>
                       )}
                     </div>
-                    {omniRouteModels.status === "idle" && (
-                      <p className="text-xs text-fg-faint">Enter a base URL above to fetch its live model list.</p>
-                    )}
-                    {omniRouteModels.status === "fail" && (
-                      <p className="text-xs text-error">
-                        Couldn't reach /v1/models — check the base URL/key. ({omniRouteModels.message})
-                      </p>
-                    )}
-                    {omniRouteModels.status === "ok" && omniRouteModelGroups.length === 0 && (
-                      <p className="text-xs text-fg-faint">No models reported by this gateway.</p>
-                    )}
-                    {omniRouteModels.status === "ok" && omniRouteModelGroups.length > 0 && (
-                      <div className="max-h-48 space-y-1 overflow-y-auto rounded-xl border border-border-subtle bg-canvas p-2">
-                        {omniRouteModelGroups.map(([alias, models]) => (
-                          <details key={alias} className="text-xs">
-                            <summary className="cursor-pointer select-none py-0.5 font-medium text-fg-dim">
-                              {alias} <span className="font-normal text-fg-faint">({models.length})</span>
-                            </summary>
-                            <ul className="mt-0.5 space-y-0.5 pl-3 text-fg-faint">
-                              {models.map((id) => (
-                                <li key={id} className="truncate">
-                                  {id}
-                                </li>
-                              ))}
-                            </ul>
-                          </details>
-                        ))}
-                      </div>
-                    )}
-                  </div>
+                  )}
 
                   <div className="space-y-1.5">
                     <div className="flex items-center gap-2">
                       <button
                         type="button"
-                        onClick={() => void runOmniRouteTest()}
-                        disabled={omniRouteTest.status === "testing"}
+                        onClick={() => void runGatewayTest()}
+                        disabled={gatewayTest.status === "testing"}
                         className="flex items-center gap-2 rounded-lg border border-border bg-canvas px-3 py-2 text-sm hover:bg-bg-hover disabled:opacity-50"
                       >
-                        {omniRouteTest.status === "testing" ? (
+                        {gatewayTest.status === "testing" ? (
                           <Loader2 size={15} className="animate-spin" />
                         ) : (
                           <RefreshCw size={15} />
@@ -1156,20 +1143,20 @@ export function SettingsModal({
                         Test connection
                       </button>
                     </div>
-                    {omniRouteTest.status === "ok" && (
+                    {gatewayTest.status === "ok" && (
                       <div className="space-y-0.5">
                         <span className="flex items-center gap-1 text-sm text-success">
                           <Check size={15} /> Connected
                         </span>
                         <div className="text-xs leading-5 text-fg-dim">
-                          Replied “{omniRouteTest.result.reply || "(empty)"}” via {omniRouteTest.result.model}
-                          {omniRouteTest.result.provider && ` (${omniRouteTest.result.provider})`} ·{" "}
-                          {omniRouteTest.result.latencyMs} ms
+                          Replied “{gatewayTest.result.reply || "(empty)"}” via {gatewayTest.result.model}
+                          {gatewayTest.result.provider && ` (${gatewayTest.result.provider})`} ·{" "}
+                          {gatewayTest.result.latencyMs} ms
                         </div>
                       </div>
                     )}
-                    {omniRouteTest.status === "fail" && (
-                      <div className="text-sm text-error">Failed: {omniRouteTest.message}</div>
+                    {gatewayTest.status === "fail" && (
+                      <div className="text-sm text-error">Failed: {gatewayTest.message}</div>
                     )}
                   </div>
                 </>
@@ -1421,10 +1408,10 @@ export function SettingsModal({
 
               {draftMode !== "direct" && (
                 <p className="mb-3 rounded-xl border border-border-subtle bg-canvas p-3 text-xs leading-5 text-fg-dim">
-                  These only apply in Browser-Hosted OmniRoute (direct) mode — you're currently on
-                  OmniRoute Gateway mode, which routes and connects entirely through your own
-                  gateway instead. Configuration here is kept, but unused until you switch modes in
-                  the Providers tab.
+                  These only apply in Direct Connection mode — you're currently on Self-Hosted
+                  Gateway mode, which routes and connects entirely through your own gateway
+                  instead. Configuration here is kept, but unused until you switch modes in the
+                  Providers tab.
                 </p>
               )}
 

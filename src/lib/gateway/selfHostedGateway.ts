@@ -1,12 +1,13 @@
 /**
- * OmniRoute connection mode: talks to a real, externally-running OmniRoute
- * gateway instance (baseUrl/apiKey configured in Settings), the way InBrowser
- * did before the browser-native Direct Providers system was built. The
- * gateway may live at any address the user hosts it on. Requests go straight
- * from the browser (gateway/providerFetch.ts), so a hosted OmniRoute instance
- * must send CORS headers for this app's origin to be usable.
+ * Self-hosted gateway connection mode: talks to a real, externally-running
+ * server implementing the OmniRoute protocol (baseUrl/apiKey configured in
+ * Settings), the way InBrowser worked before the browser-native Direct
+ * Connection system was built. The gateway may live at any address the user
+ * hosts it on. Requests go straight from the browser
+ * (gateway/providerFetch.ts), so a hosted instance must send CORS headers
+ * for this app's origin to be usable.
  *
- * OmniRoute's /v1/images/* and /v1/audio/transcriptions are themselves
+ * Its /v1/images/* and /v1/audio/transcriptions are themselves
  * OpenAI-compatible, so image/audio generation here just wraps the gateway
  * as a synthetic "openai" format ProviderConnection and reuses
  * gateway/media/openai.ts rather than re-implementing it.
@@ -33,9 +34,9 @@ function authHeaders(apiKey: string, json = true): HeadersInit {
 /** Wraps baseUrl/apiKey as a ProviderConnection so gateway/media/openai.ts can be reused as-is. */
 function asConnection(baseUrl: string, apiKey: string): ProviderConnection {
   return {
-    id: "omniroute",
+    id: "gateway",
     alias: "",
-    label: "OmniRoute",
+    label: "Self-Hosted Gateway",
     format: "openai",
     baseUrl: `${baseUrl.trim().replace(/\/+$/, "")}/v1`,
     apiKey,
@@ -46,7 +47,7 @@ function asConnection(baseUrl: string, apiKey: string): ProviderConnection {
 
 // ------------------------------------------------------------------- chat
 
-export interface OmniRouteChatArgs {
+export interface GatewayChatArgs {
   baseUrl: string;
   apiKey: string;
   model: string;
@@ -62,7 +63,7 @@ export interface OmniRouteChatArgs {
   onDone?: () => void;
 }
 
-export interface OmniRouteChatResult {
+export interface GatewayChatResult {
   /** Resolved model reported via X-OmniRoute-Model — may be a bare id, reconcile against the model list. */
   resolvedModel: string | null;
   resolvedProvider: string | null;
@@ -84,7 +85,7 @@ function decisionProvider(header: string | null): string | null {
   return header;
 }
 
-export async function chatStream(args: OmniRouteChatArgs): Promise<OmniRouteChatResult> {
+export async function chatStream(args: GatewayChatArgs): Promise<GatewayChatResult> {
   const body: Record<string, unknown> = { model: args.model, messages: args.messages, stream: true };
   if (args.tools && args.tools.length > 0) {
     body.tools = args.tools;
@@ -104,7 +105,7 @@ export async function chatStream(args: OmniRouteChatArgs): Promise<OmniRouteChat
   return { resolvedModel: modelHeader, resolvedProvider: decisionProvider(decisionHeader), toolCalls };
 }
 
-export interface OmniRouteCompletionArgs {
+export interface GatewayCompletionArgs {
   baseUrl: string;
   apiKey: string;
   model?: string;
@@ -113,7 +114,7 @@ export interface OmniRouteCompletionArgs {
   signal?: AbortSignal;
 }
 
-export async function runCompletion(args: OmniRouteCompletionArgs): Promise<string> {
+export async function runCompletion(args: GatewayCompletionArgs): Promise<string> {
   const res = await providerFetch(endpoint(args.baseUrl, "/v1/chat/completions"), {
     method: "POST",
     headers: authHeaders(args.apiKey),
@@ -128,7 +129,7 @@ export async function runCompletion(args: OmniRouteCompletionArgs): Promise<stri
   return extractCompletionText(res);
 }
 
-export interface OmniRouteTestResult {
+export interface GatewayTestResult {
   reply: string;
   model: string;
   provider: string;
@@ -136,7 +137,7 @@ export interface OmniRouteTestResult {
 }
 
 /** Connection test that exercises a real (non-streaming) chat completion, mirroring the pre-rework implementation. */
-export async function testConnection(baseUrl: string, apiKey: string): Promise<OmniRouteTestResult> {
+export async function testConnection(baseUrl: string, apiKey: string): Promise<GatewayTestResult> {
   const started = performance.now();
   const res = await providerFetch(endpoint(baseUrl, "/v1/chat/completions"), {
     method: "POST",
@@ -215,7 +216,7 @@ interface RawSearchResponse {
   results?: RawSearchResult[];
 }
 
-export interface OmniRouteSearchResult {
+export interface GatewaySearchResult {
   query: string;
   provider: string;
   results: SearchResult[];
@@ -226,7 +227,7 @@ export async function webSearch(
   apiKey: string,
   query: string,
   signal?: AbortSignal
-): Promise<OmniRouteSearchResult> {
+): Promise<GatewaySearchResult> {
   const res = await providerFetch(endpoint(baseUrl, "/v1/search"), {
     method: "POST",
     headers: authHeaders(apiKey),
@@ -284,8 +285,8 @@ function tokenDataUrl(token: unknown, mime: string): string | null {
 }
 
 /**
- * Video generation responses vary across the providers OmniRoute might
- * route to: some return a `video` field, some `output`/`data` containing a
+ * Video generation responses vary across the providers a gateway speaking
+ * this protocol might route to: some return a `video` field, some `output`/`data` containing a
  * url, some return an `id` to poll. Tolerantly handle the common shapes and
  * surface a useful message when a job id must be polled separately (no
  * generic polling support here, unlike gateway/media/gemini.ts's Veo path).

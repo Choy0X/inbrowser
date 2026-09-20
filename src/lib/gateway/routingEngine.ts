@@ -1,5 +1,6 @@
 /**
- * The one auto-routing classifier engine for "Browser-Hosted OmniRoute".
+ * The one auto-routing classifier engine for direct mode (client-side,
+ * provider-diverse routing).
  *
  * Ported from OmniRoute's real auto-routing source
  * (open-sse/services/autoCombo/*.ts, open-sse/services/specificity*.ts —
@@ -532,7 +533,7 @@ export function isKnownPaymentRequired(key: string): boolean {
 }
 
 /**
- * Browser-Hosted OmniRoute is keyless-catalog-focused: a connection with no
+ * Direct mode is keyless-catalog-focused: a connection with no
  * API key configured should only offer/route to models actually known to
  * work with no key, not just whatever hasn't failed yet — see the OpenCode
  * "Missing API key" / "Qwen3Guard" sagas earlier this session. But a

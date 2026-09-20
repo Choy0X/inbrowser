@@ -45,19 +45,23 @@ const PROVIDERS_DEFAULT_SEED_KEY = "fachoy:providers:default-seed:v1";
 const LEGACY_PROXY_KEY = "fachoy:proxies:legacy:v1";
 const LEGACY_NOTICE_DISMISSED_KEY = "fachoy:proxies:legacy:dismissed";
 
-/** Default OmniRoute gateway port - unchanged from the pre-rework default. */
-export const DEFAULT_OMNIROUTE_URL = "http://localhost:20128";
+/**
+ * Example gateway URL shown as the base-URL field's placeholder - never a
+ * stored default. See migrateGatewayConnection() for why an existing
+ * install's saved value is never blanked even if it happens to equal this.
+ */
+export const GATEWAY_URL_PLACEHOLDER = "http://localhost:20128";
 
-export type ConnectionMode = "omniroute" | "direct";
+export type ConnectionMode = "direct" | "gateway";
 
-export interface OmniRouteConnectionSettings {
+export interface GatewayConnectionSettings {
   baseUrl: string;
   apiKey: string;
 }
 
 export interface GatewaySettings {
   mode: ConnectionMode;
-  omniroute: OmniRouteConnectionSettings;
+  gateway: GatewayConnectionSettings;
   providers: ProviderConnection[];
   /** Global pool of user-owned proxies, direct mode only. See gateway/proxyRouting.ts. */
   proxies: CustomProxy[];
@@ -77,7 +81,7 @@ export interface GatewaySettings {
 export function defaultSettings(): GatewaySettings {
   return {
     mode: "direct",
-    omniroute: { baseUrl: DEFAULT_OMNIROUTE_URL, apiKey: "" },
+    gateway: { baseUrl: "", apiKey: "" },
     providers: [],
     proxies: [],
     proxiesEnabled: true,
@@ -93,11 +97,12 @@ export function getSettings(): GatewaySettings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) {
-      const parsed = JSON.parse(raw) as Partial<GatewaySettings>;
+      const parsed = JSON.parse(raw) as Partial<GatewaySettings> & { omniroute?: unknown };
       const defaults = defaultSettings();
+      const { mode, gateway } = migrateGatewayConnection(parsed.mode, parsed.gateway, parsed.omniroute);
       return withDefaultProviderSeed({
-        mode: parsed.mode === "omniroute" ? "omniroute" : "direct",
-        omniroute: { ...defaults.omniroute, ...parsed.omniroute },
+        mode,
+        gateway,
         providers: Array.isArray(parsed.providers) ? parsed.providers : [],
         proxies: migrateProxies(parsed.proxies).proxies,
         proxiesEnabled: parsed.proxiesEnabled !== false,
@@ -136,6 +141,41 @@ function withDefaultProviderSeed(settings: GatewaySettings): GatewaySettings {
   } catch {
     return settings;
   }
+}
+
+/**
+ * Migrates the connection-mode fields from any pre-rename saved shape.
+ *
+ * Before this shipped, the mode value was "omniroute" (now "gateway") and its
+ * connection settings lived under an `omniroute` key (now `gateway`). Every
+ * fresh install used to get a baked-in default baseUrl of
+ * "http://localhost:20128" whether or not the user ever configured anything;
+ * that default is gone for fresh installs (see defaultSettings()), but an
+ * existing install's saved JSON must resolve to the exact same connection it
+ * had before. There is no way, from the saved value alone, to tell "the user
+ * typed this exact URL" apart from "the old default was never touched" -
+ * blanking a stored value that happens to equal the retired default would
+ * risk silently discarding a real, working config for someone who genuinely
+ * runs their gateway on that port. So this does not attempt that detection.
+ */
+export function migrateGatewayConnection(
+  rawMode: unknown,
+  rawGateway: unknown,
+  rawOmniroute: unknown
+): { mode: ConnectionMode; gateway: GatewayConnectionSettings } {
+  const mode: ConnectionMode = rawMode === "omniroute" || rawMode === "gateway" ? "gateway" : "direct";
+  const source = (isConnectionShape(rawGateway) ? rawGateway : isConnectionShape(rawOmniroute) ? rawOmniroute : {}) as Partial<GatewayConnectionSettings>;
+  return {
+    mode,
+    gateway: {
+      baseUrl: typeof source.baseUrl === "string" ? source.baseUrl : "",
+      apiKey: typeof source.apiKey === "string" ? source.apiKey : "",
+    },
+  };
+}
+
+function isConnectionShape(v: unknown): v is Partial<GatewayConnectionSettings> {
+  return typeof v === "object" && v !== null;
 }
 
 /**

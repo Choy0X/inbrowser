@@ -58,7 +58,7 @@ export function privacyPolicySections(brand: PolicyBrand): PolicySection[] {
     {
       title: "AI providers are called directly from your browser",
       paragraphs: [
-        `When you chat, search, or generate media, the request goes straight from your browser to whichever provider you selected - a keyless provider from the built-in list, your own API-keyed connection, or a self-hosted OmniRoute gateway you configured. Unless you have configured a proxy, ${app} does not relay that traffic through a server of its own, so each provider sees only your own request rather than a shared pool of everyone's traffic. Each provider is responsible for its own privacy practices once your request reaches it.`,
+        `When you chat, search, or generate media, the request goes straight from your browser to whichever provider you selected - a keyless provider from the built-in list, your own API-keyed connection, or a self-hosted gateway you configured. Unless you have configured a proxy, ${app} does not relay that traffic through a server of its own, so each provider sees only your own request rather than a shared pool of everyone's traffic. Each provider is responsible for its own privacy practices once your request reaches it.`,
       ],
     },
     {

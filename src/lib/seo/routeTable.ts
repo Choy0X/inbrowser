@@ -74,7 +74,7 @@ export const SEO_ROUTES: SeoRoute[] = [
       },
       {
         heading: "Keyless providers, called straight from your browser",
-        body: "Several hosted providers work with no signup and no API key. Requests go directly from your browser to the provider rather than through a shared server, so rate limits apply per person instead of being exhausted by everyone at once. You can also point the app at your own OmniRoute gateway, or route traffic through an HTTP, HTTPS, SOCKS5 or SOCKS4 proxy you control.",
+        body: "Several hosted providers work with no signup and no API key. Requests go directly from your browser to the provider rather than through a shared server, so rate limits apply per person instead of being exhausted by everyone at once. You can also point the app at your own self-hosted gateway, or route traffic through an HTTP, HTTPS, SOCKS5 or SOCKS4 proxy you control.",
       },
       {
         heading: "Code that runs in the tab",

@@ -28,7 +28,7 @@ import {
   messageToPayload,
   runCompletion,
   saveSettings,
-  testOmniRouteConnection,
+  testGatewayConnection,
   testProviderConnection,
   testProxyConnection,
   webSearch,
@@ -420,8 +420,8 @@ export default function App() {
   }, []);
 
   // Direct mode builds the model/capability list synchronously from
-  // configured connections; OmniRoute mode fetches it from the gateway. See
-  // loadModelsAndCapabilities in lib/onniroute.ts.
+  // configured connections; gateway mode fetches it from the connected
+  // gateway. See loadModelsAndCapabilities in lib/onniroute.ts.
   const refreshGateway = useCallback(async () => {
     setStatus("checking");
     const { models: modelList, index, ok } = await loadModelsAndCapabilities();
@@ -481,12 +481,12 @@ export default function App() {
   const currentModel = activeConversation?.model ?? defaultModel;
   const caps = modelCapabilities(currentModel, capabilityIndex);
   const providerSummary =
-    settings.mode === "omniroute"
+    settings.mode === "gateway"
       ? (() => {
           try {
-            return new URL(settings.omniroute.baseUrl).host;
+            return new URL(settings.gateway.baseUrl).host;
           } catch {
-            return settings.omniroute.baseUrl;
+            return settings.gateway.baseUrl;
           }
         })()
       : (() => {
@@ -887,8 +887,8 @@ export default function App() {
           if ((model === "auto" || model.startsWith("auto/")) && result.resolvedModel) {
             // Direct mode already returns a fully-qualified "alias/modelId" (picked
             // client-side, see gateway/autoRoute.ts) that matches an entry in
-            // `models` exactly. OmniRoute mode reports a possibly-bare id via
-            // X-OmniRoute-Model that needs reconciling against the fetched model
+            // `models` exactly. Gateway mode reports a possibly-bare id via the
+            // X-OmniRoute-Model response header that needs reconciling against the fetched model
             // list to get the routable id — don't pin a bare/unqualified id the
             // gateway can't route on a later request ("Unable to determine
             // provider for model '...'").
@@ -1520,8 +1520,8 @@ export default function App() {
     return testProviderConnection(connection);
   }, []);
 
-  const handleTestOmniRoute = useCallback(async (baseUrl: string, apiKey: string) => {
-    return testOmniRouteConnection(baseUrl, apiKey);
+  const handleTestGateway = useCallback(async (baseUrl: string, apiKey: string) => {
+    return testGatewayConnection(baseUrl, apiKey);
   }, []);
 
   /** `relayUrl` carries the unsaved Settings draft, so a relay can be tried before it is saved. */
@@ -1817,7 +1817,7 @@ export default function App() {
         settings={settings}
         onSave={handleSaveSettings}
         onTestConnection={handleTestConnection}
-        onTestOmniRoute={handleTestOmniRoute}
+        onTestGateway={handleTestGateway}
         onTestProxy={handleTestProxy}
         onExportBackup={handleExportBackup}
         onImportBackup={handleImportBackup}
