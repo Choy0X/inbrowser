@@ -1,3 +1,5 @@
+import { logProtocolViolation } from "./protocolOutputLog";
+
 /** Tracks Markdown code examples without buffering their bodies. */
 export function createLiteralTracker() {
   let fence = 0, inline = 0, run = 0;
@@ -41,10 +43,18 @@ function validArtifactHeader(header: string): boolean {
 
 /** Known protocol boundaries outside literal examples end the answer. Never
  * interpret text pretending to be a function call as an executable tool. */
-export function createProtocolOutputGuard(onText: (text: string) => void, allowArtifacts = false) {
+export function createProtocolOutputGuard(
+  onText: (text: string) => void,
+  allowArtifacts = false,
+  context?: { modelId?: string; connectionAlias?: string }
+) {
   const literal = createLiteralTracker();
   let pending = "", stopped = false, artifact = false, openingArtifact = false;
   let violations = 0;
+  function recordViolation(reason: string) {
+    violations++;
+    logProtocolViolation({ ...context, reason, snippet: pending.slice(0, 300) });
+  }
   function drain(final = false) {
     let output = "";
     while (pending && !stopped) {
@@ -52,9 +62,9 @@ export function createProtocolOutputGuard(onText: (text: string) => void, allowA
         const end = pending.indexOf(">");
         if (end < 0) {
           if (!final && pending.length <= 512) break;
-          stopped = true; violations++; break;
+          stopped = true; recordViolation("artifact-header-unterminated"); break;
         }
-        if (end > 512 || !validArtifactHeader(pending.slice(0, end + 1))) { stopped = true; violations++; break; }
+        if (end > 512 || !validArtifactHeader(pending.slice(0, end + 1))) { stopped = true; recordViolation("artifact-header-invalid"); break; }
         output += pending.slice(0, end + 1);
         pending = pending.slice(end + 1);
         openingArtifact = false; artifact = true;
@@ -75,14 +85,14 @@ export function createProtocolOutputGuard(onText: (text: string) => void, allowA
             const close = lower.indexOf(lower[1] + ">");
             if (close < 0) {
               if (!final && pending.length < 96) break;
-              stopped = true; violations++; break;
+              stopped = true; recordViolation("special-token-unterminated"); break;
             }
             const token = lower.slice(2, close).replaceAll("▁", "_");
             if (/tool|function|im_end|im_start|eot_id|end_of_text|end.*sentence|start_header_id/.test(token)) {
               stopped = true;
               // An ordinary end-of-turn token is a boundary, not evidence
               // that the model failed to answer correctly.
-              if (/tool|function|im_start|start_header_id/.test(token)) violations++;
+              if (/tool|function|im_start|start_header_id/.test(token)) recordViolation(`special-token:${token}`);
               break;
             }
             pending = pending.slice(close + 2);
@@ -91,12 +101,12 @@ export function createProtocolOutputGuard(onText: (text: string) => void, allowA
           const marker = MARKERS.find(m => lower.startsWith(m));
           if (marker) {
             if (marker === ARTIFACT_OPEN && allowArtifacts) { openingArtifact = true; continue; }
-            stopped = true; violations++; break;
+            stopped = true; recordViolation(`marker:${marker}`); break;
           }
           if (MARKERS.some(m => m.startsWith(lower))) {
             if (!final) break;
             // Do not leak a truncated protocol prefix; keep ordinary '<' text.
-            if (lower.length >= 5) { stopped = true; violations++; break; }
+            if (lower.length >= 5) { stopped = true; recordViolation("marker-prefix-truncated"); break; }
           }
         }
       }

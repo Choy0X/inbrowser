@@ -458,13 +458,21 @@ export async function chatStream(options: ChatStreamOptions): Promise<ChatStream
 
   let target: ResolvedTarget | null = null;
   let activeProxy: CustomProxy | null = null;
-  let protocolRepairAttempted = false;
+  // Keyed per (connection, model) rather than one flag for the whole turn, so
+  // that in an auto-route sequence every candidate actually tried gets its
+  // own one-shot repair chance instead of only the first one to hit this.
+  const protocolRepairAttempted = new Set<string>();
   // A relay/proxy-transport failure (e.g. the tunnel closing mid-request) is
   // inherently transient — the identical target often succeeds on a bare
   // retry, since nothing about the request itself was wrong. Bounded to one
   // extra attempt per (connection, model, proxy) so it can't by itself
   // consume the budget connection-diversity/proxy-rotation rely on.
   const sameTargetRetries = new Map<string, number>();
+  // A pinned (non-auto) model that fails its protocol repair has nowhere else
+  // to go — unlike auto mode it never rotates to a different candidate — so
+  // it gets one bounded bare retry of the identical target afterward, kept in
+  // its own counter so it can't consume the transport-retry budget above.
+  const postRepairRetries = new Map<string, number>();
   // Tracks a run of consecutive attempts that all failed with the same
   // relay/proxy-level failure code, possibly across different providers —
   // that pattern means the shared relay/proxy hop itself is unhealthy, not
@@ -529,7 +537,7 @@ export async function chatStream(options: ChatStreamOptions): Promise<ChatStream
       visibleContent ||= Boolean(t.trim());
       firstResponseMs ??= Math.round(performance.now() - started);
       reportProxy(); streamedAny = true; options.onDelta(t);
-    }, policy.allowArtifacts);
+    }, policy.allowArtifacts, { modelId: currentTarget.modelId, connectionAlias: currentTarget.connection.alias });
     const chatArgs: AdapterChatArgs = {
       connection: currentTarget.connection,
       modelId: currentTarget.modelId,
@@ -642,12 +650,28 @@ export async function chatStream(options: ChatStreamOptions): Promise<ChatStream
 
       // One bounded correction can recover a formatting failure. Never replay
       // after visible output or execute any part of a rejected tool batch.
-      if (!streamedAny && !protocolRepairAttempted && attempt < maxAttempts - 1 &&
-        err instanceof GatewayError && (err.code === "invalid_tool_call" || err.code === "invalid_model_output")) {
-        protocolRepairAttempted = true;
+      const isProtocolFailure = err instanceof GatewayError &&
+        (err.code === "invalid_tool_call" || err.code === "invalid_model_output");
+      const repairKey = `${currentTarget.connection.id}:${currentTarget.modelId}`;
+      if (!streamedAny && !protocolRepairAttempted.has(repairKey) && attempt < maxAttempts - 1 && isProtocolFailure) {
+        protocolRepairAttempted.add(repairKey);
         options = { ...options, messages: [...options.messages, { role: "system",
           content: "Your previous response could not be used. Answer the latest user request directly. Use only the supplied tools through native function calls with valid JSON object arguments. If no tool is supplied, answer in plain text. Do not emit internal tool markup or invent extra tasks." }] };
         continue;
+      }
+      // A pinned (non-auto) target never rotates to a different candidate, so
+      // a repair that also failed the same way would otherwise end the turn
+      // immediately with no recourse. One bare retry of the identical target
+      // (no further repair message — one already ran) before giving up,
+      // tracked separately so it can't consume the transport-retry budget
+      // below.
+      if (!isAuto && !streamedAny && attempt < maxAttempts - 1 && isProtocolFailure &&
+        protocolRepairAttempted.has(repairKey)) {
+        const priorPostRepairRetries = postRepairRetries.get(repairKey) ?? 0;
+        if (priorPostRepairRetries < 1) {
+          postRepairRetries.set(repairKey, priorPostRepairRetries + 1);
+          continue;
+        }
       }
       // A relay/proxy-transport-level failure is inherently transient (a
       // dropped tunnel, a momentary block) — retry the identical target once
