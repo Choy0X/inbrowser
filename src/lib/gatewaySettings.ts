@@ -50,7 +50,7 @@ const LEGACY_NOTICE_DISMISSED_KEY = "fachoy:proxies:legacy:dismissed";
  * stored default. See migrateGatewayConnection() for why an existing
  * install's saved value is never blanked even if it happens to equal this.
  */
-export const GATEWAY_URL_PLACEHOLDER = "http://localhost:20128";
+export const GATEWAY_URL_PLACEHOLDER = "https://your-gateway.example.com";
 
 export type ConnectionMode = "direct" | "gateway";
 

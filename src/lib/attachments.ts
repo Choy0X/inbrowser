@@ -1,12 +1,30 @@
-import { GlobalWorkerOptions, getDocument } from "pdfjs-dist";
-import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
-import * as mammoth from "mammoth";
 import type { Attachment, AttachmentKind } from "./types";
 import type { ModelCapabilities } from "./capabilities";
 import { transcribeAudioFile } from "./onniroute";
 import { newId } from "./store";
 
-GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+/** Lazy: pdfjs-dist is only needed once a user actually attaches a PDF, and
+ *  otherwise costs every visitor ~364KB of eager first-load JS for nothing. */
+let pdfjsPromise: Promise<typeof import("pdfjs-dist")> | null = null;
+function loadPdfjs() {
+  if (!pdfjsPromise) {
+    pdfjsPromise = Promise.all([
+      import("pdfjs-dist"),
+      import("pdfjs-dist/build/pdf.worker.min.mjs?url"),
+    ]).then(([mod, worker]) => {
+      mod.GlobalWorkerOptions.workerSrc = worker.default;
+      return mod;
+    });
+  }
+  return pdfjsPromise;
+}
+
+/** Lazy for the same reason as pdfjs-dist above - only needed for .doc/.docx. */
+let mammothPromise: Promise<typeof import("mammoth")> | null = null;
+function loadMammoth() {
+  if (!mammothPromise) mammothPromise = import("mammoth");
+  return mammothPromise;
+}
 
 export const FILE_KIND_META: Record<
   AttachmentKind,
@@ -214,6 +232,7 @@ export interface PdfResult {
 
 /** Extract PDF text; if the PDF has no text layer, rasterize pages to images. */
 export async function extractPdf(file: File, maxPages = 8): Promise<PdfResult> {
+  const { getDocument } = await loadPdfjs();
   const data = await file.arrayBuffer();
   const doc = await getDocument({ data }).promise;
   const pageCount = Math.min(doc.numPages, maxPages);
@@ -308,6 +327,7 @@ export async function extractDoc(file: File): Promise<DocResult> {
 
   // Fallback: let mammoth try (it can occasionally parse simple .doc files).
   try {
+    const mammoth = await loadMammoth();
     const result = await mammoth.extractRawText({ arrayBuffer });
     const text = (result.value || "").trim();
     if (text) return { text, images: [] };
@@ -322,6 +342,7 @@ export async function extractDoc(file: File): Promise<DocResult> {
 
 /** Extract text AND embedded images from a .docx (OOXML zip) via mammoth. */
 export async function extractDocx(file: File): Promise<DocResult> {
+  const mammoth = await loadMammoth();
   const arrayBuffer = await file.arrayBuffer();
   const text = await mammoth.extractRawText({ arrayBuffer }).then((r) => r.value || "");
 

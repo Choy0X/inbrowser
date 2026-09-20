@@ -907,6 +907,15 @@ export default defineConfig({
   },
   build: {
     chunkSizeWarningLimit: 1600,
+    // docgen (the docx/pdf-lib *writer*, for exporting generated documents) is
+    // only ever reached via dynamic import() from ArtifactPanel.tsx, but Vite
+    // still auto-preloads dynamic-import targets found in eagerly-loaded
+    // modules as a "warm the cache" heuristic - which defeats the point of
+    // splitting it out for a feature most sessions never use. Excluding it
+    // here keeps it a real lazy fetch instead of a preloaded one.
+    modulePreload: {
+      resolveDependencies: (_filename, deps) => deps.filter((dep) => !dep.includes("docgen")),
+    },
     rollupOptions: {
       output: {
         manualChunks: {

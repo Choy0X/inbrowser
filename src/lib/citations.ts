@@ -110,15 +110,5 @@ export function normalizeCitationMarkers(raw: string): string {
   flushProse();
 
   const normalized = segments.join("\n");
-  if (normalized !== raw) {
-    // STEP 1b diagnostic: prove the raw string carried stranded markers.
-    // eslint-disable-next-line no-console
-    console.debug(
-      "[citations] pulled stranded [n] markers inline\nraw:",
-      JSON.stringify(raw).slice(0, 1000),
-      "\nnormalized:",
-      JSON.stringify(normalized).slice(0, 1000),
-    );
-  }
   return normalized;
 }
