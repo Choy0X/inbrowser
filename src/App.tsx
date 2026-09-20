@@ -91,6 +91,7 @@ import type { PageExcerpt } from "./lib/reader";
 import { readTopResults } from "./lib/reader";
 import { Sidebar } from "./components/Sidebar";
 import { LocalModelProgress } from "./components/LocalModelProgress";
+import { AnalyticsConsentBar } from "./components/AnalyticsConsentBar";
 import { BrowserDock } from "./components/BrowserPanel";
 import type { Agent } from "./lib/agents";
 import { loadAgents, saveAgents } from "./lib/agents";
@@ -1807,6 +1808,7 @@ export default function App() {
         onOpenSettings={() => openSettings("providers")}
       />
       <LocalModelProgress />
+      <AnalyticsConsentBar />
       <BrowserDock />
       <SettingsModal
         open={settingsOpen}

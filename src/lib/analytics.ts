@@ -2,7 +2,10 @@
  * Google Analytics (GA4), loaded only when a deployer has set
  * config.json's client.analyticsId - empty by default, so a fork of this
  * repository does not silently report its own visitors to InBrowser's GA
- * property.
+ * property. It is also gated on visitor consent (analyticsConsent.ts):
+ * `trackPageview` is a no-op until the visitor has explicitly accepted, so
+ * `ensureLoaded()` - and the gtag script/cookie it injects - never runs
+ * before that.
  *
  * Page views are sent by hand rather than through GA4's own automatic
  * pageview: this is a single-page app, so a client-side route change never
@@ -13,6 +16,7 @@
  * counting that first load.
  */
 import { APP_ANALYTICS_ID } from "./appConfig";
+import { hasAnalyticsConsent } from "./analyticsConsent";
 import type { ResolvedSeo } from "./seo/head";
 
 declare global {
@@ -49,7 +53,7 @@ function ensureLoaded(): void {
  * a third party, not a server of ours.
  */
 export function trackPageview(seo: ResolvedSeo, pathname: string): void {
-  if (!APP_ANALYTICS_ID || typeof window === "undefined") return;
+  if (!APP_ANALYTICS_ID || typeof window === "undefined" || !hasAnalyticsConsent()) return;
   ensureLoaded();
 
   const path = seo.route.indexable ? pathname : seo.route.path;
