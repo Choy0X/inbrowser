@@ -1,7 +1,7 @@
 {
   "name": "inbrowser",
   "private": true,
-  "version": "0.4.3",
+  "version": "0.4.6",
   "license": "SEE LICENSE IN LICENSE",
   "type": "module",
   "description": "The whole AI stack in one browser tab. Local models, twelve language runtimes, agents and skills. No account, no API key, no server.",

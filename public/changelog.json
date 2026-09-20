@@ -1,5 +1,36 @@
 [
   {
+    "version": "0.4.6",
+    "date": "2026-09-20",
+    "items": [
+      "Fixed: the Settings modal was unusable on narrow phone screens - the connection-mode and proxy routing-mode pickers crammed long descriptions into columns as narrow as 100px; they now stack into a single column below tablet width.",
+      "Fixed: on/off switches (Memory, Run code, proxy routing, etc.) rendered as circles instead of pill-shaped toggles on mobile, because a touch-target sizing rule was overriding their height; they now keep their intended shape while buttons that need a full touch target still get one.",
+      "Fixed: small icon buttons in Settings (remove provider, accept/reject/forget memory, export/import proxies) were inflated to oversized touch targets on mobile and threw their rows out of alignment; they stay compact again, and the memory \"forget\" button - previously visible only on hover - now shows up on mobile too.",
+      "Fixed: the model picker sat flush against the screen edge on mobile with no breathing room; it now matches the spacing used by every other dialog.",
+      "Fixed: tapping a citation badge on mobile immediately navigated away instead of showing the source preview, since touch devices have no hover; tapping now opens the preview like hovering does on desktop, and tapping outside it closes it."
+    ]
+  },
+  {
+    "version": "0.4.5",
+    "date": "2026-09-20",
+    "items": [
+      "New installs now come pre-seeded with every keyless provider and a starter pool of free proxies, so free models work right away without manual setup; proxy discovery runs on a schedule server-side instead of per-client, backed by a shared Redis-cached catalog, with a master switch to turn proxy routing off entirely.",
+      "\"Run code\" and the built-in plugin tools are now enabled by default in Settings instead of requiring opt-in.",
+      "Renamed the \"OmniRoute\" connection mode to \"Self-Hosted Gateway\" for clarity - existing gateway connections migrate automatically and keep working.",
+      "Site analytics now require your explicit consent via a bottom bar before Google Analytics loads at all - no tracking script or cookie until you accept, and there is exactly one place to answer instead of two."
+    ]
+  },
+  {
+    "version": "0.4.4",
+    "date": "2026-09-18",
+    "items": [
+      "Fixed: a proxied chat reply could arrive all at once at the end of the turn instead of streaming - three separate causes are fixed: the CDN in front of the relay was buffering the response, the SSE parser didn't handle the CRLF line endings some providers use, and the tunnel's own flow control could stall delivery.",
+      "Every fenced code block a model generates now becomes a real file artifact in the side panel; mermaid, LaTeX and chart blocks render correctly instead of turning into generic code files, and a chart still renders even if the model forgets to fence it.",
+      "Fixed a bug where a reply that produced no visible content could be dropped entirely instead of showing what did come through.",
+      "The proxy relay is more reliable under real concurrent load: it sheds requests cleanly at capacity instead of degrading, reports the actual reason a connection failed instead of a generic error, and tracks rate limits per user instead of a single shared platform-wide budget."
+    ]
+  },
+  {
     "version": "0.4.3",
     "date": "2026-09-18",
     "items": [
