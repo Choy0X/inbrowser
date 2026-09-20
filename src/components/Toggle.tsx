@@ -25,7 +25,7 @@ export function Toggle({
         if (disabled) return;
         onChange(!checked);
       }}
-      className={`flex h-6 w-11 shrink-0 items-center rounded-full p-0.5 transition-colors ${
+      className={`flex h-6 w-11 shrink-0 items-center rounded-full p-0.5 transition-colors !min-h-0 ${
         checked ? "bg-accent" : "bg-fg/15"
       } ${disabled ? "cursor-not-allowed opacity-50" : ""}`}
     >

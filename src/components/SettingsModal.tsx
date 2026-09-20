@@ -255,14 +255,14 @@ const ProviderConnectionCard = memo(function ProviderConnectionCard({
           <button
             type="button"
             onClick={() => onRemove(connection.id)}
-            className="shrink-0 rounded p-1 text-fg-faint hover:text-error"
+            className="shrink-0 rounded p-1 text-fg-faint hover:text-error !min-h-0"
           >
             <Trash2 size={14} />
           </button>
         </Tooltip>
       </div>
 
-      <div className="grid grid-cols-2 gap-2">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
         <div>
           <label className="mb-1 block text-xs text-fg-dim">Alias (routing prefix)</label>
           <Input
@@ -1046,7 +1046,7 @@ export function SettingsModal({
 
           {tab === "providers" && (
             <>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                 {MODE_OPTIONS.map((opt) => (
                   <button
                     key={opt.value}
@@ -1212,7 +1212,7 @@ export function SettingsModal({
                       <button
                         type="button"
                         onClick={() => setPresetPickerOpen(false)}
-                        className="shrink-0 rounded p-0.5 text-fg-faint hover:text-fg"
+                        className="shrink-0 rounded p-0.5 text-fg-faint hover:text-fg !min-h-0"
                       >
                         <X size={14} />
                       </button>
@@ -1370,7 +1370,7 @@ export function SettingsModal({
                       onClick={() => { setProxyExportSelection(null); setProxyIoMode("export"); }}
                       aria-label="Export proxies"
                       disabled={draftProxies.length === 0}
-                      className="flex items-center rounded-lg border border-border bg-canvas p-1.5 hover:bg-bg-hover disabled:opacity-40"
+                      className="flex items-center rounded-lg border border-border bg-canvas p-1.5 hover:bg-bg-hover disabled:opacity-40 !min-h-0"
                     >
                       <Download size={13} />
                     </button>
@@ -1380,7 +1380,7 @@ export function SettingsModal({
                       type="button"
                       onClick={() => setProxyIoMode("import")}
                       aria-label="Import proxies"
-                      className="flex items-center rounded-lg border border-border bg-canvas p-1.5 hover:bg-bg-hover disabled:opacity-40"
+                      className="flex items-center rounded-lg border border-border bg-canvas p-1.5 hover:bg-bg-hover disabled:opacity-40 !min-h-0"
                     >
                       <Upload size={13} />
                     </button>
@@ -1462,7 +1462,7 @@ export function SettingsModal({
                 />
               </div>
 
-              <div className="mb-4 grid grid-cols-3 gap-2">
+              <div className="mb-4 grid grid-cols-1 gap-2 sm:grid-cols-3">
                 {PROXY_MODE_OPTIONS.map((opt) => {
                   const Icon = opt.icon;
                   const active = draftProxyMode === opt.value;
@@ -1615,7 +1615,7 @@ export function SettingsModal({
                                   <button
                                     type="button"
                                     onClick={() => acceptPending(m.id)}
-                                    className="rounded p-1 text-fg-faint hover:text-success"
+                                    className="rounded p-1 text-fg-faint hover:text-success !min-h-0"
                                   >
                                     <Check size={13} />
                                   </button>
@@ -1624,7 +1624,7 @@ export function SettingsModal({
                                   <button
                                     type="button"
                                     onClick={() => rejectPending(m.id)}
-                                    className="rounded p-1 text-fg-faint hover:text-error"
+                                    className="rounded p-1 text-fg-faint hover:text-error !min-h-0"
                                   >
                                     <X size={13} />
                                   </button>
@@ -1694,7 +1694,7 @@ export function SettingsModal({
                                 <button
                                   type="button"
                                   onClick={() => removeMemory(m.id)}
-                                  className="shrink-0 rounded p-1 text-fg-faint opacity-0 transition-opacity group-hover:opacity-100 hover:text-error"
+                                  className="shrink-0 rounded p-1 text-fg-faint opacity-0 transition-opacity group-hover:opacity-100 hover:text-error !min-h-0 max-md:opacity-100"
                                 >
                                   <Trash2 size={13} />
                                 </button>
