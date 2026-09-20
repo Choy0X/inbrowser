@@ -38,6 +38,7 @@ where you are and what your selected model can do, and nothing else.
 - [Privacy and the optional proxy relay](#privacy-and-the-optional-proxy-relay)
 - [Quick start](#quick-start)
 - [Self-hosting](#self-hosting)
+- [How to install](#how-to-install)
 - [Development](#development)
 - [Browser support](#browser-support)
 - [FAQ](#faq)
@@ -237,6 +238,405 @@ rule. Fronting the origin also keeps its address out of the open.
 configured a proxy, so it should be sandboxed like anything else handling credentials: its own
 user, no write access outside its own directory, and a reverse proxy terminating public TLS in
 front of it.
+
+## How to install
+
+The section above covers the shape of a deployment. This is the full recipe the production
+instance actually runs, end to end, on a fresh **Debian** VPS (x86_64 or aarch64) behind
+**Cloudflare**, with **inbrowser-relay** (the proxy egress Worker) deployed alongside it. Adapt
+package names and unit files if you're on a different distribution; the sequence itself doesn't
+change.
+
+**Before you start, you'll need:**
+
+- A Debian VPS with root access, at least ~4 GB of RAM+swap free (the client build holds the
+  whole module graph plus multi-megabyte Monaco/WebLLM chunks in memory) and ~10 GB free disk
+  for the build (`node_modules` alone is roughly 2.1 GB, `dist/` about 300 MB).
+- **Node.js 22+** already on the box. The production server runs under Node; the build tool
+  (Bun) is installed separately in step 5 and never runs the app itself.
+- A domain on **Cloudflare**, with an **Origin Certificate** for it: Cloudflare dashboard,
+  SSL/TLS > Origin Server > Create Certificate. Keep the certificate and private key handy;
+  you'll copy them to the box in step 9. This only works with SSL/TLS mode set to **Full
+  (strict)** (see step 13), because an Origin Certificate is trusted by Cloudflare, not by
+  browsers directly.
+- A [Cloudflare account](https://dash.cloudflare.com) with Workers enabled, for **inbrowser-relay**.
+
+### 1. Generate the shared relay secret, and deploy the Worker
+
+The app and the Worker authenticate each other with one shared secret. Generate it once, before
+either side is deployed:
+
+```bash
+openssl rand -hex 32
+```
+
+Keep the output. Then, from a clone of
+[**inbrowser-relay**](https://github.com/Choy0X/inbrowser-relay):
+
+```bash
+npm install
+npx wrangler secret put RELAY_SECRET     # paste the value you generated above
+npx wrangler deploy
+```
+
+Before deploying, set `ALLOWED_ORIGINS` in the Worker's `wrangler.toml` to your app's real
+domain (comma-separated; a bare host, a full origin, or a `*.` wildcard all work). Note the
+Worker's resulting URL: you'll point the app at `wss://<that-worker>/v1` in step 6. Full detail
+on this half, including what it can and can't see, lives in
+[inbrowser-relay's own README](https://github.com/Choy0X/inbrowser-relay#deploy).
+
+### 2. Get the app onto the server
+
+```bash
+git clone https://github.com/Choy0X/Inbrowser.git /opt/inbrowser
+cd /opt/inbrowser
+```
+
+Any path works; the rest of this guide assumes `/opt/inbrowser`.
+
+### 3. System packages
+
+```bash
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg debian-keyring debian-archive-keyring \
+  apt-transport-https ufw fail2ban unattended-upgrades openssl iproute2 redis-server redis-tools
+```
+
+**Redis 7 or newer is required** (check with `redis-server --version`). It backs the proxy
+catalog cache (step 7), on its own dedicated instance, not the system default.
+
+**Caddy** (TLS termination, step 9) isn't in Debian's default repos:
+
+```bash
+curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
+  | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
+  | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt-get update
+sudo apt-get install -y caddy
+```
+
+If total RAM+swap is under ~4 GB, add 2 GB of swap before building, or the build is likely to be
+OOM-killed:
+
+```bash
+sudo dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+sudo sysctl -w vm.swappiness=10
+```
+
+### 4. Create a dedicated service user
+
+Neither the build nor the running service should run as root:
+
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin inbrowser
+sudo chown -R inbrowser:inbrowser /opt/inbrowser
+```
+
+### 5. Install Bun, and build
+
+Bun is a build tool only here; pin a version so a later Bun release can't change the build
+under a redeploy:
+
+```bash
+curl -fsSL https://bun.sh/install | BUN_INSTALL=/tmp/bun bash -s 'bun-v1.3.14'
+sudo install -m 0755 /tmp/bun/bin/bun /usr/local/bin/bun
+```
+
+Then build as the service user, not root, with the JS heap raised to most of the box's RAM (the
+default ceiling is well under total RAM regardless of how much is actually free, and Rollup
+needs the room for the Monaco/WebLLM chunks):
+
+```bash
+sudo -u inbrowser bash -c '
+  cd /opt/inbrowser
+  export NODE_OPTIONS="--max-old-space-size=$(( $(awk "/MemTotal/{print int(\$2/1024)}" /proc/meminfo) * 3 / 4 ))"
+  bun install --frozen-lockfile
+  bun run build
+'
+```
+
+Confirm it actually produced both halves: `dist/index.html` (client) and
+`server/dist/relay.cjs` (server). `--frozen-lockfile` fails if `bun.lock` doesn't describe
+exactly what `package.json` asks for (usually a dependency added and installed with npm
+instead of Bun). Fix that by running `bun install` from a checkout and committing the updated
+lockfile; don't drop `--frozen-lockfile` on the server as the fix.
+
+### 6. Configure the relay secret on this server
+
+This has to be the **exact same value** generated in step 1: a mismatch isn't visible as an
+error; the server starts fine and users see "The relay could not authenticate this request."
+
+```bash
+sudo install -d -m 0700 /etc/inbrowser
+printf 'RELAY_SECRET=%s\n' '<the value from step 1>' | sudo tee /etc/inbrowser/relay.env
+sudo chmod 0600 /etc/inbrowser/relay.env
+```
+
+Also point the app at the Worker from step 1 by setting `server.workerUrl` in `config.json` to
+`wss://<your-worker>/v1` (this isn't a secret, so it's fine committed), or override it with a
+`WORKER_URL` environment variable in the systemd unit below instead.
+
+### 7. Set up a dedicated Redis cache
+
+A separate authenticated instance on its own port, so it can't collide with any other use of the
+system default on 6379, and so its cache data (proxy-catalog snapshots, not user data) never
+needs the durability a general-purpose Redis would default to:
+
+```bash
+REDIS_PASSWORD=$(openssl rand -hex 32)
+sudo install -d -m 0750 -o root -g redis /etc/inbrowser-redis
+
+sudo tee /etc/inbrowser-redis/redis.conf > /dev/null <<EOF
+bind 127.0.0.1
+port 6380
+protected-mode yes
+requirepass ${REDIS_PASSWORD}
+daemonize no
+supervised no
+databases 1
+save ""
+appendonly no
+maxmemory 1024mb
+maxmemory-policy noeviction
+EOF
+sudo chmod 0640 /etc/inbrowser-redis/redis.conf
+sudo chown root:redis /etc/inbrowser-redis/redis.conf
+
+printf 'REDIS_URL=redis://127.0.0.1:6380\nREDIS_PASSWORD=%s\nREDIS_KEY_PREFIX=inbrowser:v1:\n' \
+  "$REDIS_PASSWORD" | sudo tee /etc/inbrowser/redis.env > /dev/null
+sudo chmod 0600 /etc/inbrowser/redis.env
+```
+
+Give it a systemd unit of its own (`/etc/systemd/system/inbrowser-redis.service`):
+
+```ini
+[Unit]
+Description=InBrowser dedicated Redis cache
+After=network.target
+
+[Service]
+Type=simple
+User=redis
+Group=redis
+ExecStart=/usr/bin/redis-server /etc/inbrowser-redis/redis.conf
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now inbrowser-redis
+redis-cli -h 127.0.0.1 -p 6380 -a "$REDIS_PASSWORD" PING   # expect PONG
+```
+
+### 8. Create the systemd service for the app
+
+`/etc/systemd/system/inbrowser.service`:
+
+```ini
+[Unit]
+Description=InBrowser
+After=network-online.target inbrowser-redis.service
+Wants=network-online.target inbrowser-redis.service
+
+[Service]
+Type=simple
+User=inbrowser
+Group=inbrowser
+
+# config.json and dist/ are resolved against the working directory, and a wrong
+# one fails silently - every setting just falls back to its default.
+WorkingDirectory=/opt/inbrowser
+
+# Without this the server takes its dev branch and imports vite, which isn't in
+# the production bundle.
+Environment=NODE_ENV=production
+Environment=PORT=4173
+EnvironmentFile=-/etc/inbrowser/relay.env
+EnvironmentFile=/etc/inbrowser/redis.env
+
+ExecStart=/usr/bin/node /opt/inbrowser/server/dist/relay.cjs
+Restart=always
+RestartSec=2
+
+# Four workers rather than one process: a garbage-collection pause on a single
+# process would stall every live streamed reply at once.
+Environment=CLUSTER_WORKERS=4
+
+# Baseline sandboxing. RestrictAddressFamilies needs AF_NETLINK (Fastify's own
+# listen-address logging enumerates network interfaces) and AF_UNIX (node:cluster's
+# primary/worker IPC) alongside the obvious AF_INET/AF_INET6, or the service
+# crash-loops while still reporting "active".
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+StateDirectory=inbrowser
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now inbrowser
+```
+
+### 9. Terminate TLS with Caddy
+
+Copy the Origin Certificate and key from the prerequisites onto the box (`scp`, a pasted file,
+however you prefer) and install them where Caddy can read them:
+
+```bash
+sudo install -m 0640 -o root -g caddy origin.pem /etc/caddy/origin.pem
+sudo install -m 0640 -o root -g caddy origin.key /etc/caddy/origin.key
+```
+
+`/etc/caddy/Caddyfile`:
+
+```caddyfile
+your-domain.com {
+	# An Origin Certificate is trusted only by Cloudflare, and Caddy's automatic
+	# HTTPS (ACME) can't succeed behind the proxy anyway - naming the files here
+	# disables it for this site, which is what we want.
+	tls /etc/caddy/origin.pem /etc/caddy/origin.key
+
+	# Strip the header that can carry a configured proxy's credentials before it
+	# ever reaches the access log.
+	log {
+		format filter {
+			wrap json
+			request>headers>X-Relay-Meta delete
+		}
+	}
+
+	reverse_proxy 127.0.0.1:4173 {
+		# A streamed chat reply must not be buffered.
+		flush_interval -1
+	}
+}
+
+# Every subdomain redirects to the apex. Needs its own Cloudflare DNS record
+# (proxied) per subdomain to ever be reached at all - see step 13.
+*.your-domain.com {
+	tls /etc/caddy/origin.pem /etc/caddy/origin.key
+	redir https://your-domain.com{uri} permanent
+}
+```
+
+```bash
+sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+sudo systemctl reload caddy
+```
+
+### 10. Lock down the firewall
+
+Allow SSH **before** anything else is denied, or you lock yourself out:
+
+```bash
+sudo ufw allow 22/tcp
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+```
+
+Restrict 443 to Cloudflare's own published ranges: this is what actually stops the origin being
+reached directly, bypassing TLS.
+
+```bash
+for range in $(curl -fsS https://www.cloudflare.com/ips-v4) $(curl -fsS https://www.cloudflare.com/ips-v6); do
+  sudo ufw allow from "$range" to any port 443 proto tcp
+done
+sudo ufw --force enable
+```
+
+Port 4173 is closed to the outside by the default-deny above; that's what keeps the app from
+being reachable without TLS in front of it.
+
+### 11. Basic hardening
+
+Security-only automatic updates, reboot left manual (an unattended reboot of a single-box
+deployment is an outage nobody scheduled):
+
+```bash
+sudo tee /etc/apt/apt.conf.d/51inbrowser-unattended > /dev/null <<'EOF'
+Unattended-Upgrade::Origins-Pattern {
+        "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+};
+Unattended-Upgrade::Automatic-Reboot "false";
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
+```
+
+fail2ban for sshd (the only service exposed to the whole internet, since 443 is Cloudflare-only):
+
+```bash
+sudo tee /etc/fail2ban/jail.d/inbrowser.local > /dev/null <<'EOF'
+[sshd]
+enabled = true
+maxretry = 5
+bantime = 1h
+EOF
+sudo systemctl enable --now fail2ban
+```
+
+**Deliberately not covered:** sshd itself is left alone. If you harden it (`PasswordAuthentication
+no`, `PermitRootLogin prohibit-password`), verify a second session logs in successfully before
+closing the one you have.
+
+### 12. Verify
+
+```bash
+systemctl is-active inbrowser inbrowser-redis
+curl -s http://127.0.0.1:4173/health                       # expect {"ok":true,...}
+curl -sI http://127.0.0.1:4173/ | grep -i cross-origin      # COOP/COEP must both be present
+```
+
+Missing COOP/COEP means `crossOriginIsolated` is false in the browser, which silently breaks
+`SharedArrayBuffer` and interactive Python `input()`. If `/health` doesn't answer, check
+`journalctl -u inbrowser -n 50 --no-pager`.
+
+### 13. Finish up in the Cloudflare dashboard
+
+Nothing after this point can be scripted from the box itself:
+
+1. **DNS.** An A record for your domain pointing at this server, **proxied** (orange cloud).
+   Add `www` (and any other subdomain) the same way: the Caddyfile redirects every subdomain to
+   the apex, but only for names that actually resolve and are proxied; a grey-cloud record
+   points at an IP the firewall drops.
+2. **SSL/TLS mode: Full (strict).** An Origin Certificate is trusted nowhere else.
+3. **Cache rules for the runtime assets.** Cloudflare doesn't cache `.wasm`, `.tar` or `.pch` by
+   default, so without a rule every cold visitor pulls the full WebAssembly runtime set (~300 MB)
+   from your origin instead of the edge. Add a cache rule matching
+   `/pyodide/* /php/* /ruby/* /r/* /cpp/* /assets/* /monacoeditorwork/*` that respects the
+   origin's TTL.
+4. **Always Use HTTPS: on.** Port 80 is closed on the origin.
+
+### Operating it
+
+```bash
+systemctl status inbrowser
+systemctl status inbrowser-redis
+journalctl -u inbrowser -f
+```
+
+To update: pull as the service user, rebuild, restart.
+
+```bash
+sudo -u inbrowser git -C /opt/inbrowser pull
+sudo -u inbrowser bash -c 'cd /opt/inbrowser && bun install --frozen-lockfile && bun run build'
+sudo systemctl restart inbrowser
+```
 
 ## Development
 
