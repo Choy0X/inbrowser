@@ -12,6 +12,17 @@ export type PluginStateMap = Record<string, PluginState>;
 const DEFAULTS: PluginStateMap = {
   javascript: { installed: true, enabled: true },
   python: { installed: false, enabled: false },
+  "tool-regex": { installed: true, enabled: true },
+  "tool-text-stats": { installed: true, enabled: true },
+  "tool-diff": { installed: true, enabled: true },
+  "tool-json": { installed: true, enabled: true },
+  "tool-csv": { installed: true, enabled: true },
+  "tool-hash": { installed: true, enabled: true },
+  "tool-uuid": { installed: true, enabled: true },
+  "tool-jwt": { installed: true, enabled: true },
+  "tool-color": { installed: true, enabled: true },
+  "tool-datetime": { installed: true, enabled: true },
+  "tool-units": { installed: true, enabled: true },
 };
 
 export function loadPluginStates(): PluginStateMap {

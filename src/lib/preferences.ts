@@ -23,14 +23,33 @@ export interface Preferences {
   tokenOptimization: boolean;
   /**
    * Tool ids the model may call, beyond the skill tools (which switch
-   * themselves on whenever a skill is active). Opt-in by design: fetching
-   * arbitrary URLs or executing code is not something to hand a model unless
-   * the user asked for it. See lib/tools/registry.ts.
+   * themselves on whenever a skill is active). Fetching arbitrary URLs
+   * remains opt-in by design; code execution (via the runtimes you've
+   * installed) and the built-in plugin utilities default on. See
+   * lib/tools/registry.ts and DEFAULT_ENABLED_TOOLS below.
    */
   enabledTools: string[];
 }
 
 const KEY = "fachoy:preferences:v1";
+
+/** "Run code" plus every built-in plugin utility - the tool groups on by default. */
+const DEFAULT_ENABLED_TOOLS = [
+  "run_code",
+  "tool-regex",
+  "tool-text-stats",
+  "tool-diff",
+  "tool-json",
+  "tool-csv",
+  "tool-hash",
+  "tool-uuid",
+  "tool-jwt",
+  "tool-color",
+  "tool-datetime",
+  "tool-units",
+];
+
+const TOOLS_DEFAULT_SEED_KEY = "fachoy:tools:default-seed:v1";
 
 /** Fixed system prompt applied to every chat; not user-configurable. */
 export const DEFAULT_SYSTEM_PROMPT = `You are a helpful, knowledgeable, and direct AI assistant.
@@ -71,18 +90,40 @@ export function defaultPreferences(): Preferences {
     memories: [],
     pendingMemories: [],
     tokenOptimization: false,
-    enabledTools: [],
+    enabledTools: [...DEFAULT_ENABLED_TOOLS],
   };
+}
+
+/**
+ * Turns on "Run code" and "Plugin tools" the first time loadPreferences()
+ * runs after this defaulted on - both for a brand-new install and for an
+ * existing one whose enabledTools was saved before that. Additive and
+ * one-time only: it never removes an id, and never runs again once the flag
+ * is set, so explicitly turning one of these back off afterward is respected
+ * on every later load.
+ */
+function withDefaultToolSeed(preferences: Preferences): Preferences {
+  try {
+    if (localStorage.getItem(TOOLS_DEFAULT_SEED_KEY)) return preferences;
+    localStorage.setItem(TOOLS_DEFAULT_SEED_KEY, "1");
+    const missing = DEFAULT_ENABLED_TOOLS.filter((id) => !preferences.enabledTools.includes(id));
+    if (missing.length === 0) return preferences;
+    const seeded = { ...preferences, enabledTools: [...preferences.enabledTools, ...missing] };
+    savePreferences(seeded);
+    return seeded;
+  } catch {
+    return preferences;
+  }
 }
 
 export function loadPreferences(): Preferences {
   try {
     const raw = localStorage.getItem(KEY);
-    if (raw) return { ...defaultPreferences(), ...JSON.parse(raw) };
+    if (raw) return withDefaultToolSeed({ ...defaultPreferences(), ...JSON.parse(raw) });
   } catch {
     /* ignore */
   }
-  return defaultPreferences();
+  return withDefaultToolSeed(defaultPreferences());
 }
 
 export function savePreferences(preferences: Preferences): void {
